@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, AliasChoices, field_validator
 from typing import Optional
 
 
@@ -22,9 +22,28 @@ class Settings(BaseSettings):
     )
     DB_ECHO: bool = Field(default=False)
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def assemble_db_url(cls, v: str) -> str:
+        """
+        Преобразует строку подключения PostgreSQL к формату asyncpg.
+        Хостинги вроде Render, Neon, Supabase передают postgres:// или postgresql://,
+        а асинхронный SQLAlchemy требует postgresql+asyncpg://.
+        """
+        if isinstance(v, str):
+            if v.startswith("postgres://"):
+                return v.replace("postgres://", "postgresql+asyncpg://", 1)
+            if v.startswith("postgresql://") and not v.startswith("postgresql+asyncpg://"):
+                return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
     # Cross-bot API (Intercom)
     API_HOST: str = Field(default="0.0.0.0")
-    API_PORT: int = Field(default=8000)
+    API_PORT: int = Field(
+        default=8000,
+        validation_alias=AliasChoices("PORT", "API_PORT"),
+        description="Порт для FastAPI (автоматически подхватывает PORT от Render или API_PORT)"
+    )
     INTERCOM_SECRET_TOKEN: str = Field(
         default="town_cross_bot_secret_token_12345",
         description="Секретный токен для авторизации между ботом города и ботом опросов"

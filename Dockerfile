@@ -2,10 +2,15 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
+# Отключение буферизации для мгновенного вывода логов в Render
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 # Установка системных зависимостей
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование requirements и установка библиотек
@@ -16,7 +21,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Копирование исходного кода
 COPY . .
 
-# Открытие порта для Cross-bot API
-EXPOSE 8000
+# Открытие портов (8000 для локального запуска, 10000 для Render)
+EXPOSE 8000 10000
 
 CMD ["python", "main.py"]

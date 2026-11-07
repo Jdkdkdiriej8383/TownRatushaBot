@@ -32,6 +32,15 @@ async def test_intercom_api(db_session: AsyncSession, sample_users):
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # 0. Проверка эндпоинтов здоровья (для Render / UptimeRobot)
+        resp_root = await client.get("/")
+        assert resp_root.status_code == 200
+        assert resp_root.json()["status"] == "ok"
+
+        resp_health = await client.get("/health")
+        assert resp_health.status_code == 200
+        assert resp_health.json()["status"] == "ok"
+
         # 1. Проверка авторизации (без токена -> 401)
         resp_unauth = await client.get("/api/v1/users/1001/voting-status")
         assert resp_unauth.status_code == 401

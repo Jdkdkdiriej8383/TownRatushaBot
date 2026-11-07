@@ -23,6 +23,10 @@ def create_api_app() -> FastAPI:
 
     app.include_router(intercom_router)
 
+    @app.get("/", tags=["Health"])
+    async def root_health():
+        return {"status": "ok", "service": "TownRatushaBot"}
+
     @app.get("/health", tags=["Health"])
     async def health_check():
         return {"status": "ok", "service": "TownBot Cross-Bot API"}
