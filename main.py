@@ -1,0 +1,90 @@
+import asyncio
+import logging
+import uvicorn
+from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+
+from config import settings
+from db.base import get_session_maker, get_engine, Base
+from db.seed import seed_database
+from bot.middlewares import (
+    DatabaseSessionMiddleware,
+    UserSyncMiddleware,
+    ChatRegulatorMiddleware,
+)
+from bot.handlers import get_main_router
+from api import create_api_app, set_bot_instance
+from tasks import start_scheduler_loop
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("townbot")
+
+
+async def run_fastapi(app, host: str, port: int):
+    """Запуск FastAPI сервера в текущем асинхронном цикле событий."""
+    config = uvicorn.Config(
+        app=app,
+        host=host,
+        port=port,
+        log_level="info",
+        loop="asyncio"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+async def main():
+    logger.info("Запуск Telegram-бота Города и Cross-Bot API...")
+
+    # 1. Инициализация базы данных и сидинг (регуляторы + законы)
+    try:
+        await seed_database()
+    except Exception as e:
+        logger.warning("Не удалось выполнить seed_database (проверьте DATABASE_URL): %s", e)
+
+    session_maker = get_session_maker()
+
+    # 2. Инициализация бота aiogram 3.x
+    bot = Bot(
+        token=settings.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
+    dp = Dispatcher()
+
+    # 3. Регистрация Middlewares
+    dp.update.middleware(DatabaseSessionMiddleware(session_maker))
+    dp.message.middleware(UserSyncMiddleware())
+    dp.message.middleware(ChatRegulatorMiddleware())
+
+    # 4. Регистрация Handlers
+    main_router = get_main_router()
+    dp.include_router(main_router)
+
+    # 5. Инициализация Cross-Bot API (FastAPI)
+    api_app = create_api_app()
+    set_bot_instance(bot)
+
+    logger.info("Все компоненты сконфигурированы. Запуск сервисов...")
+
+    # 6. Параллельный запуск: aiogram polling + FastAPI server + фоновый планировщик
+    try:
+        await asyncio.gather(
+            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),
+            run_fastapi(api_app, settings.API_HOST, settings.API_PORT),
+            start_scheduler_loop(session_maker, bot, interval_seconds=60),
+        )
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Остановка сервисов по сигналу завершения...")
+    finally:
+        await bot.session.close()
+        engine = get_engine()
+        await engine.dispose()
+        logger.info("TownBot успешно остановлен.")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
