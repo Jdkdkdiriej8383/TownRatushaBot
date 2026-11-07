@@ -70,16 +70,37 @@ async def main():
 
     logger.info("Все компоненты сконфигурированы. Запуск сервисов...")
 
-    # 6. Параллельный запуск: aiogram polling + FastAPI server + фоновый планировщик
-    try:
-        await asyncio.gather(
+    # 6. Параллельный контролируемый запуск сервисов
+    tasks = [
+        asyncio.create_task(
             dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),
+            name="aiogram_polling",
+        ),
+        asyncio.create_task(
             run_fastapi(api_app, settings.API_HOST, settings.API_PORT),
+            name="fastapi_server",
+        ),
+        asyncio.create_task(
             start_scheduler_loop(session_maker, bot, interval_seconds=60),
+            name="scheduler_loop",
+        ),
+    ]
+
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
         )
+        for task in done:
+            if not task.cancelled() and task.exception():
+                logger.error("Служба '%s' завершилась с ошибкой: %s", task.get_name(), task.exception())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Остановка сервисов по сигналу завершения...")
     finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await bot.session.close()
         engine = get_engine()
         await engine.dispose()

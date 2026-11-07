@@ -1,10 +1,13 @@
 import asyncio
+import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.base import get_session_maker, get_engine, Base
 from db.models import Regulator, Law, ChatSettings
 from core.enums import PositionLevel, LawSection
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_REGULATORS = [
@@ -381,11 +384,20 @@ DEFAULT_LAWS = [
 ]
 
 
-async def seed_database():
+async def seed_database(max_retries: int = 5, retry_delay: float = 3.0):
     """Создает таблицы и наполняет базу данных базовыми регуляторами и законами."""
     engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            break
+        except Exception as e:
+            if attempt == max_retries:
+                logger.error(f'DB connection failed after {max_retries} attempts: {e}')
+                raise
+            logger.warning(f'DB attempt {attempt}/{max_retries} failed ({e}). Retrying in {retry_delay}s...')
+            await asyncio.sleep(retry_delay)
 
     session_factory = get_session_maker()
     async with session_factory() as session:
