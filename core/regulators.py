@@ -8,6 +8,7 @@ from core.exceptions import (
     EnemyOfTownError,
     SelfPunishmentError,
 )
+from config import settings
 
 
 def format_duration(seconds: int) -> str:
@@ -61,9 +62,17 @@ class RegulatorService:
         """
         Проверка субординации:
         Блюститель может наказывать ТОЛЬКО пользователей с должностью СТРОГО ниже своей!
+        Овнер (@DivniDed) обладает абсолютным иммунитетом.
         """
         if issuer.telegram_id == target.telegram_id:
             raise SelfPunishmentError()
+
+        # Овнер города обладает абсолютной неприкосновенностью
+        if target.telegram_id == settings.OWNER_ID or (target.username and target.username.lower() == settings.OWNER_USERNAME.lower()):
+            raise SubordinationViolationError(
+                issuer_title=issuer.position_title,
+                target_title="Овнер города"
+            )
 
         if issuer.is_enemy:
             raise EnemyOfTownError(reason="Поражение в правах. Враг города не имеет полномочий.")
@@ -187,6 +196,12 @@ class RegulatorService:
     ) -> Regulator:
         if issuer.telegram_id == target.telegram_id:
             raise SelfPunishmentError()
+
+        if target.telegram_id == settings.OWNER_ID or (target.username and target.username.lower() == settings.OWNER_USERNAME.lower()):
+            raise SubordinationViolationError(
+                issuer_title=issuer.position_title,
+                target_title="Овнер города"
+            )
 
         if issuer.is_enemy:
             raise EnemyOfTownError()

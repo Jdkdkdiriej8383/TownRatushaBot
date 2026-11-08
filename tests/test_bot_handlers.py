@@ -18,7 +18,7 @@ async def test_cmd_law_card(db_session):
 
     message.answer.assert_called_once()
     reply_text = message.answer.call_args[0][0]
-    assert "Статья 2.1. Оскорбления и токсичность" in reply_text
+    assert "Статья 2.1. Оскорбление руководства" in reply_text
     assert "ГОРОДСКОЙ СВОД ЗАКОНОВ" in reply_text
 
 

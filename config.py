@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     MAIN_CHAT_ID: Optional[int] = Field(default=None, description="ID основного супергруппового чата города")
     LOG_CHAT_ID: Optional[int] = Field(default=None, description="ID чата судебного протокола и логов")
 
+    # City Owner & Creator
+    OWNER_ID: int = Field(default=1965081517, description="Telegram ID владельца/овнера города")
+    OWNER_USERNAME: str = Field(default="DivniDed", description="Username овнера города")
+    RULES_URL: str = Field(default="https://teletype.in/@townratushabot/Rules", description="Ссылка на Свод правил на Teletype")
+
     # Database
     DATABASE_URL: str = Field(
         default="postgresql+asyncpg://town_user:town_pass@localhost:5432/towndb",
