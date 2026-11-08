@@ -37,6 +37,11 @@ class Settings(BaseSettings):
                 v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
             if "sslmode=" in v:
                 v = v.replace("sslmode=", "ssl=")
+            # Удаляем специфичный параметр Prisma ?pgbouncer=true, который asyncpg не поддерживает
+            if "?pgbouncer=true" in v:
+                v = v.replace("?pgbouncer=true", "")
+            elif "&pgbouncer=true" in v:
+                v = v.replace("&pgbouncer=true", "")
             return v
         return v
 

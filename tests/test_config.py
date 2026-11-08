@@ -22,6 +22,10 @@ def test_settings_database_url_formatting():
     s5 = Settings(DATABASE_URL="postgresql://user:pass@ep-host.neon.tech/neondb?sslmode=require")
     assert s5.DATABASE_URL == "postgresql+asyncpg://user:pass@ep-host.neon.tech/neondb?ssl=require"
 
+    # Проверка удаления ?pgbouncer=true для совместимости с asyncpg
+    s6 = Settings(DATABASE_URL="postgresql://user:pass@ep-host.supabase.com:6543/postgres?pgbouncer=true")
+    assert s6.DATABASE_URL == "postgresql+asyncpg://user:pass@ep-host.supabase.com:6543/postgres"
+
 
 def test_settings_port_alias():
     # Проверка поддержки Render env переменной PORT
