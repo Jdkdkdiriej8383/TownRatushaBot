@@ -16,18 +16,10 @@ services:
       - key: LOG_CHAT_ID
         sync: false
       - key: DATABASE_URL
-        fromDatabase:
-          name: town-ratusha-db
-          property: connectionString
+        sync: false
       - key: INTERCOM_SECRET_TOKEN
         generateValue: true
       - key: FINE_EXPIRATION_HOURS
         value: 48
       - key: FINE_DOUBLE_MULTIPLIER
         value: 2.0
-
-databases:
-  - name: town-ratusha-db
-    plan: free
-    databaseName: towndb
-    user: town_user

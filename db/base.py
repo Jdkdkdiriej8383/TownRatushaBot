@@ -20,10 +20,18 @@ _session_maker: async_sessionmaker[AsyncSession] | None = None
 def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
+        connect_args = {}
+        if "postgresql" in settings.DATABASE_URL:
+            # Для надежной работы с пулерами Supabase (Supavisor / PgBouncer, порты 6543 и 5432)
+            # и предотвращения ошибок DuplicatePreparedStatementError / prepared statement does not exist
+            connect_args["prepared_statement_cache_size"] = 0
+            connect_args["statement_cache_size"] = 0
+
         _engine = create_async_engine(
             settings.DATABASE_URL,
             echo=settings.DB_ECHO,
             future=True,
+            connect_args=connect_args,
         )
     return _engine
 
