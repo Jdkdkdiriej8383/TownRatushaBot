@@ -1,8 +1,9 @@
+from datetime import datetime, timezone, timedelta
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from aiogram.types import Message, User as TgUser, Chat
 from bot.handlers.laws import cmd_law, cmd_law_edit
-from bot.handlers.justice import cmd_fine
+from bot.handlers.justice import cmd_fine, cmd_amnesty
 from bot.handlers.passport import cmd_passport, cmd_set_nick
 from bot.handlers.common import cmd_summon_all
 from bot.handlers.regulators_admin import (
@@ -11,7 +12,8 @@ from bot.handlers.regulators_admin import (
     cmd_toggle_antilink,
 )
 from bot.commands import setup_bot_commands, BOT_COMMANDS
-from core.enums import PositionLevel
+from db.models import Fine
+from core.enums import PositionLevel, FineStatus
 
 
 @pytest.mark.asyncio
@@ -245,3 +247,112 @@ async def test_setup_bot_commands_menu():
     assert "nick" in command_names
     assert "laws" in command_names
     assert "regulators" in command_names
+    assert "amnesty" in command_names
+
+
+@pytest.mark.asyncio
+async def test_cmd_amnesty_individual(db_session, sample_users):
+    """Тест команды /амнистия для конкретного нарушителя."""
+    admin = sample_users["admin"]
+    enemy = sample_users["enemy"]
+
+    # Даем нарушителю предупреждения, статус розыска и активный штраф
+    enemy.warns_count = 3
+    enemy.is_wanted = True
+    fine = Fine(
+        user_id=enemy.id,
+        target_telegram_id=enemy.telegram_id,
+        issuer_id=admin.id,
+        issuer_telegram_id=admin.telegram_id,
+        law_article="2.1",
+        amount=15000,
+        original_amount=15000,
+        reason="Оскорбление",
+        status=FineStatus.ACTIVE.value,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=48),
+    )
+    db_session.add(fine)
+    await db_session.commit()
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100777
+    chat.restrict = AsyncMock()
+    chat.unban = AsyncMock()
+
+    message = MagicMock(spec=Message)
+    message.chat = chat
+    message.text = f"/амнистия @{enemy.username} Чистосердечное раскаяние"
+    message.reply_to_message = None
+    message.answer = AsyncMock()
+    message.bot = None
+
+    await cmd_amnesty(message, db_session, db_user=admin)
+
+    message.answer.assert_called_once()
+    reply = message.answer.call_args[0][0]
+    assert "АКТ ГОРОДСКОЙ АМНИСТИИ" in reply
+    assert enemy.full_name in reply
+
+    # Проверяем, что все снято
+    assert enemy.warns_count == 0
+    assert enemy.is_wanted is False
+    assert enemy.is_enemy is False
+    assert enemy.role_level == PositionLevel.CITIZEN.value
+    assert fine.status == FineStatus.CANCELLED.value
+    chat.restrict.assert_called_once()
+    chat.unban.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_amnesty_all(db_session, sample_users):
+    """Тест всеобщей городской амнистии (/амнистия все)."""
+    admin = sample_users["admin"]
+    citizen = sample_users["citizen"]
+
+    citizen.warns_count = 2
+    citizen.is_wanted = True
+    await db_session.commit()
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100777
+
+    message = MagicMock(spec=Message)
+    message.chat = chat
+    message.text = "/амнистия все В честь дня основания города"
+    message.answer = AsyncMock()
+    message.bot = None
+
+    await cmd_amnesty(message, db_session, db_user=admin)
+
+    message.answer.assert_called_once()
+    reply = message.answer.call_args[0][0]
+    assert "ОБЩАЯ ГОРОДСКАЯ АМНИСТИЯ ОБЪЯВЛЕНА!" in reply
+    assert citizen.warns_count == 0
+    assert citizen.is_wanted is False
+
+
+@pytest.mark.asyncio
+async def test_cmd_amnesty_citizen_forbidden(db_session, sample_users):
+    """Тест попытки объявить амнистию обычным жителем — отказ."""
+    citizen = sample_users["citizen"]
+    enemy = sample_users["enemy"]
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100777
+    chat.get_member = AsyncMock(return_value=MagicMock(status="member"))
+
+    message = MagicMock(spec=Message)
+    message.chat = chat
+    message.from_user = MagicMock(id=citizen.telegram_id)
+    message.text = f"/амнистия @{enemy.username}"
+    message.reply_to_message = None
+    message.answer = AsyncMock()
+
+    await cmd_amnesty(message, db_session, db_user=citizen)
+
+    message.answer.assert_called_once()
+    reply = message.answer.call_args[0][0]
+    assert "только Администрация" in reply

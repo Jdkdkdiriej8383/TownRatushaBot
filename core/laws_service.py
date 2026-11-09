@@ -70,7 +70,7 @@ class LawService:
         session: AsyncSession,
         target_user: User,
         issuer_user: User,
-        punishment_type: PunishmentType,
+        punishment_type: PunishmentType | str,
         law_article: Optional[str],
         duration_seconds: Optional[int],
         reason: str
@@ -80,7 +80,7 @@ class LawService:
             target_telegram_id=target_user.telegram_id,
             issuer_id=issuer_user.id,
             issuer_telegram_id=issuer_user.telegram_id,
-            punishment_type=punishment_type.value,
+            punishment_type=punishment_type.value if hasattr(punishment_type, "value") else str(punishment_type),
             law_article=law_article,
             duration_seconds=duration_seconds,
             reason=reason,

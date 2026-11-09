@@ -1,4 +1,5 @@
 import time
+import logging
 from typing import Optional
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -13,6 +14,8 @@ from core.fine_service import FineService
 from core.exceptions import TownBaseException, UserNotFoundError
 from bot.utils import extract_target_user
 from config import settings
+
+logger = logging.getLogger("townbot.justice")
 
 router = Router(name="justice_router")
 
@@ -326,3 +329,194 @@ async def cmd_pay_fine(message: Message, session: AsyncSession, db_user: User):
         f"Сумма: <code>{paid_fine.amount:,}</code> валюты внесена в городскую казну.\n"
         f"Статус тикета: Оплачен. Претензии казначейства сняты."
     )
+
+
+@router.message(Command("амнистия", "amnesty", "unban", "unmute"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("амнистия", "amnesty", "/амнистия", "/amnesty", "разбан", "размут"))))
+async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
+    """
+    Команда /амнистия @юзер [причина] (или /amnesty, или ответом на сообщение нарушителя,
+    или /амнистия все для общегородской амнистии).
+    Полное прощение нарушений:
+    - Обнуление предупреждений (варнов)
+    - Аннулирование активных/просроченных штрафов (статус cancelled)
+    - Снятие розыска (is_wanted = False)
+    - Восстановление из статуса «Враг города» (is_enemy = False, возврат статуса Гражданина)
+    - Размут и разбан в Telegram супергруппе
+    - Запись в протокол суда (реестр правонарушений)
+    """
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    if not is_admin and message.chat.type in ("group", "supergroup") and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.answer("🚫 Объявлять амнистию вправе только Администрация города (уровни 4-5) и Владелец!")
+        return
+
+    raw_args = message.text.split()[1:] if message.text else []
+
+    # 1. Режим общегородской амнистии (/амнистия все / /амнистия all)
+    if raw_args and raw_args[0].lower() in ("все", "all", "всё"):
+        manifest_text = " ".join(raw_args[1:]).strip() if len(raw_args) > 1 else "Всеобщая городская амнистия"
+
+        # Аннулируем все активные и просроченные штрафы
+        fines_res = await session.scalars(
+            select(Fine).where(Fine.status.in_([FineStatus.ACTIVE.value, FineStatus.OVERDUE.value]))
+        )
+        all_fines = list(fines_res.all())
+        for f in all_fines:
+            f.status = FineStatus.CANCELLED.value
+
+        # Снимаем варны и розыск со всех граждан
+        users_res = await session.scalars(
+            select(User).where((User.warns_count > 0) | (User.is_wanted.is_(True)))
+        )
+        affected_users = list(users_res.all())
+        for u in affected_users:
+            u.warns_count = 0
+            u.is_wanted = False
+
+        await session.commit()
+
+        # Лог в протокол
+        await LawService.log_punishment(
+            session=session,
+            target_user=db_user,
+            issuer_user=db_user,
+            punishment_type="амнистия",
+            law_article=None,
+            duration_seconds=None,
+            reason=f"Всеобщая амнистия: {manifest_text}",
+        )
+
+        manifest = (
+            "🕊 <b>ОБЩАЯ ГОРОДСКАЯ АМНИСТИЯ ОБЪЯВЛЕНА!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏛 <b>Инициатор:</b> {db_user.full_name} ({db_user.position_title})\n"
+            f"📝 <b>Манифест:</b> {manifest_text}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Обнулены предупреждения у <b>{len(affected_users)}</b> жителей\n"
+            f"✅ Аннулировано <b>{len(all_fines)}</b> открытых штрафов казны\n"
+            "✅ Сняты все ориентировки городского розыска\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Ратуша города объявляет новый отсчет правопорядка.</i>"
+        )
+        await message.answer(manifest)
+
+        if settings.LOG_CHAT_ID and message.bot:
+            try:
+                await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=manifest)
+            except Exception:
+                pass
+        return
+
+    # 2. Индивидуальная амнистия жителя
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.answer(
+            "🕊 <b>ГОРОДСКАЯ АМНИСТИЯ</b>\n\n"
+            "Использование:\n"
+            "• <code>/амнистия @юзер [причина]</code>\n"
+            "• <code>/амнистия [telegram_id / ник] [причина]</code>\n"
+            "• Ответом на сообщение: <code>/амнистия [причина]</code>\n"
+            "• Всеобщая амнистия: <code>/амнистия все [манифест]</code>\n\n"
+            "<i>Амнистия снимает предупреждения, списывает штрафы, снимает розыск, "
+            "восстанавливает гражданские права и разблокирует в чате.</i>"
+        )
+        return
+
+    reason = " ".join(remaining_args).strip() if remaining_args else "Городская амнистия и помилование"
+
+    old_warns = target_user.warns_count
+    target_user.warns_count = 0
+    target_user.is_wanted = False
+
+    was_enemy = target_user.is_enemy
+    if target_user.is_enemy:
+        target_user.is_enemy = False
+        target_user.enemy_reason = None
+        if target_user.role_level == PositionLevel.ENEMY.value:
+            target_user.role_level = PositionLevel.CITIZEN.value
+
+    # Аннулируем штрафы
+    fines_query = select(Fine).where(
+        Fine.user_id == target_user.id,
+        Fine.status.in_([FineStatus.ACTIVE.value, FineStatus.OVERDUE.value])
+    )
+    user_fines = (await session.scalars(fines_query)).all()
+    for f in user_fines:
+        f.status = FineStatus.CANCELLED.value
+
+    # Разблокируем в чате Telegram (размут + разбан)
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.chat.restrict(
+                user_id=target_user.telegram_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                )
+            )
+        except Exception as e:
+            logger.debug("Не удалось снять мут в чате: %s", e)
+
+        try:
+            await message.chat.unban(user_id=target_user.telegram_id, only_if_banned=True)
+        except Exception as e:
+            logger.debug("Не удалось разбанить в чате: %s", e)
+
+    # Запись в судебный реестр
+    await LawService.log_punishment(
+        session=session,
+        target_user=target_user,
+        issuer_user=db_user,
+        punishment_type="амнистия",
+        law_article=None,
+        duration_seconds=None,
+        reason=f"Городская амнистия: {reason}",
+    )
+    await session.commit()
+
+    enemy_line = "✅ Снят статус «Враг города» (гражданство восстановлено)\n" if was_enemy else ""
+
+    verdict_card = (
+        "🕊 <b>АКТ ГОРОДСКОЙ АМНИСТИИ</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Гражданин:</b> {target_user.full_name} (@{target_user.username or '—'})\n"
+        f"🏛 <b>Амнистировал:</b> {db_user.full_name} ({db_user.position_title})\n"
+        f"📝 <b>Основание:</b> {reason}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Аннулировано предупреждений: <b>{old_warns}</b>\n"
+        f"✅ Списано непогашенных штрафов: <b>{len(user_fines)}</b>\n"
+        "✅ Снят статус розыска\n"
+        f"{enemy_line}"
+        "✅ Разблокирована отправка сообщений в чате\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Судебные претензии сняты. Запись внесена в городской реестр.</i>"
+    )
+    await message.answer(verdict_card)
+
+    if settings.LOG_CHAT_ID and message.bot:
+        try:
+            await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=verdict_card)
+        except Exception:
+            pass

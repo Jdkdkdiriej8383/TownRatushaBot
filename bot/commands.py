@@ -18,6 +18,7 @@ BOT_COMMANDS = [
     BotCommand(command="punish", description="Наказать нарушителя (/наказать)"),
     BotCommand(command="fine", description="Выписать штраф (/штраф)"),
     BotCommand(command="pay", description="Оплатить штраф (/оплатить)"),
+    BotCommand(command="amnesty", description="Городская амнистия (/амнистия)"),
     BotCommand(command="all", description="Созвать всех жителей в чате (/созвать)"),
     BotCommand(command="referendum", description="Общегородской референдум (/референдум)"),
     BotCommand(command="jury", description="Суд присяжных (/присяжные)"),

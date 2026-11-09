@@ -236,3 +236,23 @@ class RegulatorService:
             )
 
         return regulator
+
+    @classmethod
+    async def validate_amnesty(cls, session: AsyncSession, issuer: User) -> Regulator:
+        """
+        Проверка полномочий на объявление амнистии:
+        Разрешено только Администрации города (уровни 4-5) и Владельцу.
+        """
+        if issuer.is_enemy:
+            raise EnemyOfTownError(reason="Поражение в правах. Враг города не имеет полномочий.")
+
+        if issuer.telegram_id == settings.OWNER_ID or (issuer.username and issuer.username.lower() == settings.OWNER_USERNAME.lower()):
+            return await cls.get_regulator(session, PositionLevel.SENIOR_ADMINISTRATION.value)
+
+        regulator = await cls.get_regulator(session, issuer.role_level)
+        if issuer.role_level < PositionLevel.ADMINISTRATION.value:
+            raise RegulatorLimitExceededError(
+                f"🚫 Объявлять амнистию вправе только Администрация города (уровни 4-5) и Владелец. "
+                f"Ваша должность: <b>«{regulator.title}»</b>."
+            )
+        return regulator

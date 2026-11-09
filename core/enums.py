@@ -41,6 +41,7 @@ class PunishmentType(str, Enum):
     MUTE = "мут"
     BAN = "изгнание"              # Бан в терминах города - изгнание
     FINE = "штраф"
+    AMNESTY = "амнистия"
 
 
 class FineStatus(str, Enum):
