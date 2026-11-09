@@ -12,7 +12,7 @@ from bot.handlers.justice import (
     cmd_demote_admin,
 )
 from bot.handlers.passport import cmd_passport, cmd_set_nick
-from bot.handlers.common import cmd_summon_all, cmd_sync_menu
+from bot.handlers.common import cmd_summon_all, cmd_sync_menu, cmd_reset_database
 from bot.handlers.regulators_admin import (
     cmd_toggle_anticaps,
     cmd_toggle_mediaspam,
@@ -605,4 +605,35 @@ async def test_cmd_promote_and_demote_admin(db_session, sample_users):
     assert "ОТЗЫВ ПРАВ АДМИНИСТРАТОРА ЧАТА" in msg_dem.answer.call_args[0][0]
     chat.promote.assert_called_once()
     assert chat.promote.call_args[1]["can_manage_chat"] is False
+
+
+@pytest.mark.asyncio
+async def test_cmd_reset_database_unauthorized(sample_users):
+    """Тест попытки сброса БД обычным гражданином — отказ."""
+    citizen = sample_users["citizen"]
+    message = MagicMock(spec=Message)
+    message.text = "/сброс_бд ПОДТВЕРЖДАЮ"
+    message.answer = AsyncMock()
+
+    await cmd_reset_database(message, db_user=citizen)
+
+    message.answer.assert_called_once()
+    assert "исключительно Владельцу" in message.answer.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_cmd_reset_database_no_confirm(sample_users):
+    """Тест вызова /сброс_бд Овнером без слова ПОДТВЕРЖДАЮ — запрос подтверждения."""
+    owner = sample_users["admin"]
+    owner.telegram_id = 1965081517  # OWNER_ID
+    message = MagicMock(spec=Message)
+    message.text = "/сброс_бд"
+    message.answer = AsyncMock()
+
+    await cmd_reset_database(message, db_user=owner)
+
+    message.answer.assert_called_once()
+    assert "КРИТИЧЕСКОЕ ДЕЙСТВИЕ" in message.answer.call_args[0][0]
+    assert "ПОДТВЕРЖДАЮ" in message.answer.call_args[0][0]
+
 

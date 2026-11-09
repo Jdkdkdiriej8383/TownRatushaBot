@@ -178,3 +178,50 @@ async def cmd_sync_menu(message: Message, db_user: User):
     except Exception as e:
         await status_msg.edit_text(f"❌ <b>Ошибка при обновлении меню команд:</b> {e}")
 
+
+@router.message(Command("сброс_бд", "reset_db", "wipe_db", "пересоздать_бд"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("сброс_бд", "reset_db", "wipe_db", "пересоздать_бд", "/сброс_бд", "/reset_db", "/wipe_db", "/пересоздать_бд"))))
+async def cmd_reset_database(message: Message, db_user: User):
+    """
+    Команда полного сброса и пересоздания всех таблиц в Supabase.
+    Доступна ИСКЛЮЧИТЕЛЬНО Овнеру города (OWNER_ID).
+    Требует обязательного подтверждения: /сброс_бд ПОДТВЕРЖДАЮ
+    """
+    is_owner = (
+        db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+    if not is_owner:
+        await message.answer("🚫 Команда полного сброса базы данных доступна исключительно Владельцу города!")
+        return
+
+    raw_args = message.text.split()[1:] if message.text else []
+    if not raw_args or raw_args[0].upper() not in ("ПОДТВЕРЖДАЮ", "CONFIRM", "YES"):
+        await message.answer(
+            "⚠️ <b>ВНИМАНИЕ! КРИТИЧЕСКОЕ ДЕЙСТВИЕ!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Эта команда <b>полностью удалит все таблицы</b> в Supabase (пользователи, штрафы, история, предупреждения) "
+            "и пересоздаст их с нуля с чистым каноническим наполнением (законы, регуляторы, овнер)!\n\n"
+            "Чтобы подтвердить операцию, отправьте команду:\n"
+            "<code>/сброс_бд ПОДТВЕРЖДАЮ</code>"
+        )
+        return
+
+    status_msg = await message.answer("⏳ <i>Выполняется каскадная очистка Supabase и пересоздание всех таблиц...</i>")
+    try:
+        from db.seed import seed_database
+        await seed_database(force_wipe=True)
+        await status_msg.edit_text(
+            "♻️ <b>БАЗА ДАННЫХ SUPABASE ПОЛНОСТЬЮ ОЧИЩЕНА И ПЕРЕСОЗДАНА!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ Удалены все старые таблицы, представления и типы\n"
+            "✅ Созданы заново таблицы: <code>users</code>, <code>regulators</code>, <code>laws</code>, <code>fines</code>, <code>punishments</code>, <code>chat_settings</code>\n"
+            "✅ Зарегистрирован Овнер города (@DivniDed)\n"
+            "✅ Загружен полный реестр статей Свода Законов и матрица регуляторов\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>База данных готова к чистой работе с нуля.</i>"
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ <b>Ошибка при сбросе базы данных:</b> {e}")
+
+

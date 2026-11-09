@@ -26,6 +26,7 @@ class Settings(BaseSettings):
         description="Async SQLAlchemy database URL (PostgreSQL or SQLite for tests)"
     )
     DB_ECHO: bool = Field(default=False)
+    RESET_DB: bool = Field(default=False, description="Принудительный сброс и пересоздание всех таблиц БД")
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

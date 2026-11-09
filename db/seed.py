@@ -575,16 +575,105 @@ DEFAULT_LAWS = [
 ]
 
 
-async def seed_database(max_retries: int = 5, retry_delay: float = 3.0):
-    """Создает таблицы и наполняет/обновляет базу данных базовыми регуляторами, законами и овнером."""
+CURRENT_WIPE_VERSION = "supabase_full_clean_wipe_v1"
+
+
+async def wipe_database(conn) -> None:
+    """
+    Полностью очищает базу данных: удаляет все таблицы, последовательности,
+    представления и типы в схеме public.
+    Поддерживает PostgreSQL (Supabase) и SQLite.
+    """
+    if "postgresql" in settings.DATABASE_URL:
+        from sqlalchemy import text
+        logger.warning("Выполняется каскадная очистка всех таблиц в схеме public (Supabase / PostgreSQL)...")
+        await conn.execute(text("""
+            DO $wipe$ DECLARE
+                r RECORD;
+            BEGIN
+                -- 1. Удаление всех таблиц в public
+                FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+                    EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
+                END LOOP;
+                -- 2. Удаление всех последовательностей в public
+                FOR r IN (SELECT sequencename FROM pg_sequences WHERE schemaname = 'public') LOOP
+                    EXECUTE 'DROP SEQUENCE IF EXISTS public.' || quote_ident(r.sequencename) || ' CASCADE';
+                END LOOP;
+                -- 3. Удаление всех представлений (views) в public
+                FOR r IN (SELECT table_name FROM information_schema.views WHERE table_schema = 'public') LOOP
+                    EXECUTE 'DROP VIEW IF EXISTS public.' || quote_ident(r.table_name) || ' CASCADE';
+                END LOOP;
+                -- 4. Удаление пользовательских типов (enum) в public
+                FOR r IN (SELECT typname FROM pg_type t JOIN pg_namespace n ON t.typnamespace = n.oid WHERE n.nspname = 'public' AND t.typtype = 'e') LOOP
+                    EXECUTE 'DROP TYPE IF EXISTS public.' || quote_ident(r.typname) || ' CASCADE';
+                END LOOP;
+            END $wipe$;
+        """))
+        logger.info("Схема public (Supabase) полностью очищена.")
+    else:
+        logger.warning("Сброс всех таблиц в SQLite...")
+        await conn.run_sync(Base.metadata.drop_all)
+        logger.info("Таблицы SQLite успешно удалены.")
+
+
+async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wipe: bool = False):
+    """
+    Создает таблицы и наполняет/обновляет базу данных базовыми регуляторами, законами и овнером.
+    При force_wipe=True или settings.RESET_DB=True или при первом запуске миграции выполняет
+    полную очистку и пересоздание всех таблиц с нуля.
+    """
     engine = get_engine()
+    is_pg = "postgresql" in settings.DATABASE_URL
+    from sqlalchemy import text
+
     for attempt in range(1, max_retries + 1):
         try:
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-                if 'postgresql' in settings.DATABASE_URL:
-                    from sqlalchemy import text
-                    await conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS reprimands_count INTEGER DEFAULT 0'))
+                should_wipe = force_wipe or getattr(settings, "RESET_DB", False)
+
+                if not should_wipe:
+                    if is_pg:
+                        check_sql = text("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '_schema_migrations')")
+                    else:
+                        check_sql = text("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_schema_migrations')")
+
+                    table_exists = (await conn.execute(check_sql)).scalar()
+                    if not table_exists:
+                        should_wipe = True
+                    else:
+                        ver_check = (await conn.execute(
+                            text("SELECT 1 FROM _schema_migrations WHERE version = :ver"),
+                            {"ver": CURRENT_WIPE_VERSION}
+                        )).scalar()
+                        if ver_check != 1:
+                            should_wipe = True
+
+                if should_wipe:
+                    logger.warning("Запуск полной очистки и пересоздания базы данных (Supabase reset)...")
+                    await wipe_database(conn)
+                    await conn.run_sync(Base.metadata.create_all)
+
+                    await conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS _schema_migrations (
+                            version VARCHAR(128) PRIMARY KEY,
+                            applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """))
+                    if is_pg:
+                        await conn.execute(
+                            text("INSERT INTO _schema_migrations (version) VALUES (:ver) ON CONFLICT (version) DO NOTHING"),
+                            {"ver": CURRENT_WIPE_VERSION}
+                        )
+                    else:
+                        await conn.execute(
+                            text("INSERT OR IGNORE INTO _schema_migrations (version) VALUES (:ver)"),
+                            {"ver": CURRENT_WIPE_VERSION}
+                        )
+                    logger.info("Все таблицы успешно пересозданы, маркер %s сохранен.", CURRENT_WIPE_VERSION)
+                else:
+                    await conn.run_sync(Base.metadata.create_all)
+                    if is_pg:
+                        await conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS reprimands_count INTEGER DEFAULT 0'))
             break
         except Exception as e:
             if attempt == max_retries:
@@ -652,4 +741,6 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0):
 
 
 if __name__ == "__main__":
-    asyncio.run(seed_database())
+    import sys
+    force = "--reset" in sys.argv or "--wipe" in sys.argv
+    asyncio.run(seed_database(force_wipe=force))
