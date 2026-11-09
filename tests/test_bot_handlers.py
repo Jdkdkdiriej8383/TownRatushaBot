@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from aiogram.types import Message, User as TgUser, Chat
-from bot.handlers.laws import cmd_law, cmd_law_edit
+from bot.handlers.laws import cmd_law, cmd_laws_list, cmd_law_edit
 from bot.handlers.justice import (
     cmd_fine,
     cmd_amnesty,
@@ -36,6 +36,32 @@ async def test_cmd_law_card(db_session):
     reply_text = message.answer.call_args[0][0]
     assert "Статья 2.1. Оскорбление руководства" in reply_text
     assert "ГОРОДСКОЙ СВОД ЗАКОНОВ" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_cmd_laws_list_summary(db_session):
+    """Тест выполнения команды /законы: вывод канонической навигационной карточки."""
+    message = MagicMock(spec=Message)
+    message.text = "/законы"
+    message.answer = AsyncMock()
+
+    await cmd_laws_list(message, db_session)
+
+    message.answer.assert_called_once()
+    reply = message.answer.call_args[0][0]
+    assert "📖 <b>ГОРОДСКОЙ СВОД ЗАКОНОВ</b>" in reply
+    assert "Чтобы ознакомиться со статьей, используйте:" in reply
+    assert "/закон [номер_статьи]" in reply
+    assert "/закон 2.1" in reply
+    assert "/закон 3.12" in reply
+    assert "Разделы Свода Законов:" in reply
+    assert "• Раздел I. Общие положения (1.1 - 1.4)" in reply
+    assert "• Раздел II. Чат Telegram (2.1 - 2.12)" in reply
+    assert "• Раздел III. Внутриигровые законы (3.1 - 3.28)" in reply
+    assert "• Раздел IV. Служба и работа (4.1 - 4.4)" in reply
+    assert "Для полного списка всех статей введите: /законы" in reply
+    assert "https://teletype.in/@townratushabot/Rules" in reply
+
 
 
 @pytest.mark.asyncio
