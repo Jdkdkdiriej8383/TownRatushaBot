@@ -13,7 +13,7 @@ class PositionLevel(IntEnum):
     CHAT_WARDEN = 2               # Блюститель чата
     SENIOR_WARDEN = 3             # Старший блюститель
     ADMINISTRATION = 4            # Администрация
-    SENIOR_ADMINISTRATION = 5     # Старшая администрация
+    SENIOR_ADMINISTRATION = 5     # Высшая администрация (Старшая администрация)
 
     @classmethod
     def get_title(cls, level: int) -> str:
@@ -24,7 +24,7 @@ class PositionLevel(IntEnum):
             cls.CHAT_WARDEN: "Блюститель чата",
             cls.SENIOR_WARDEN: "Старший блюститель",
             cls.ADMINISTRATION: "Администрация",
-            cls.SENIOR_ADMINISTRATION: "Старшая администрация",
+            cls.SENIOR_ADMINISTRATION: "Высшая администрация",
         }
         return titles.get(level, f"Неизвестная должность ({level})")
 

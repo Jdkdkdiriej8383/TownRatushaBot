@@ -8,6 +8,7 @@ from core.exceptions import (
     SelfPunishmentError,
     EnemyOfTownError,
 )
+from config import settings
 
 
 @pytest.mark.asyncio
@@ -116,18 +117,33 @@ async def test_ban_rights(db_session, sample_users):
 @pytest.mark.asyncio
 async def test_edit_laws_rights(db_session, sample_users):
     """
-    Право на изменение статей Закона имеют только Администрация (4) и Старшая администрация (5).
+    Право на изменение статей Закона имеют Администрация (4), Высшая администрация (5) и Владелец.
     """
     senior_warden = sample_users["senior_warden"]
     admin = sample_users["admin"]
+    senior_admin = sample_users["senior_admin"]
 
     # Старший блюститель (3) пытается редактировать -> отказ
     with pytest.raises(RegulatorLimitExceededError):
         await RegulatorService.validate_edit_laws(db_session, senior_warden)
 
     # Администрация (4) -> разрешено
-    reg = await RegulatorService.validate_edit_laws(db_session, admin)
-    assert reg.can_edit_laws is True
+    reg4 = await RegulatorService.validate_edit_laws(db_session, admin)
+    assert reg4.can_edit_laws is True
+
+    # Высшая администрация (5) -> разрешено
+    reg5 = await RegulatorService.validate_edit_laws(db_session, senior_admin)
+    assert reg5.can_edit_laws is True
+
+    # Владелец города (DivniDed / OWNER_ID) -> разрешено
+    owner_user = User(
+        telegram_id=settings.OWNER_ID,
+        username=settings.OWNER_USERNAME,
+        full_name="Основатель",
+        role_level=0,
+    )
+    reg_owner = await RegulatorService.validate_edit_laws(db_session, owner_user)
+    assert reg_owner.can_edit_laws is True
 
 
 @pytest.mark.asyncio

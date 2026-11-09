@@ -14,6 +14,7 @@ from bot.middlewares import (
     ChatRegulatorMiddleware,
 )
 from bot.handlers import get_main_router
+from bot.commands import setup_bot_commands
 from api import create_api_app, set_bot_instance
 from tasks import start_scheduler_loop
 
@@ -64,13 +65,16 @@ async def main():
     main_router = get_main_router()
     dp.include_router(main_router)
 
-    # 5. Инициализация Cross-Bot API (FastAPI)
+    # 5. Установка меню команд в интерфейсе Telegram
+    await setup_bot_commands(bot)
+
+    # 6. Инициализация Cross-Bot API (FastAPI)
     api_app = create_api_app()
     set_bot_instance(bot)
 
     logger.info("Все компоненты сконфигурированы. Запуск сервисов...")
 
-    # 6. Параллельный контролируемый запуск сервисов
+    # 7. Параллельный контролируемый запуск сервисов
     tasks = [
         asyncio.create_task(
             dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),

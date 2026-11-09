@@ -17,7 +17,7 @@ from config import settings
 router = Router(name="justice_router")
 
 
-@router.message(Command("наказать"))
+@router.message(Command("наказать", "punish"))
 async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /наказать @юзер [номер_статьи] [опциональный_срок_в_сек/причина]
@@ -135,7 +135,7 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
         await message.answer(e.message)
 
 
-@router.message(Command("штраф"))
+@router.message(Command("штраф", "fine"))
 async def cmd_fine(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /штраф @юзер [номер_статьи] [сумма] [причина]
@@ -223,7 +223,7 @@ async def cmd_fine(message: Message, session: AsyncSession, db_user: User):
         await message.answer(e.message)
 
 
-@router.message(Command("досье"))
+@router.message(Command("досье", "dossier"))
 async def cmd_dossier(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /досье @юзер (или ответом на сообщение):
@@ -299,7 +299,7 @@ async def cmd_dossier(message: Message, session: AsyncSession, db_user: User):
     await message.answer("\n".join(dossier_text))
 
 
-@router.message(Command("оплатить"))
+@router.message(Command("оплатить", "pay"))
 async def cmd_pay_fine(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /оплатить [номер_штрафа]

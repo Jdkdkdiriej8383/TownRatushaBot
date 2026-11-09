@@ -100,15 +100,15 @@ class RegulatorService:
 
         if regulator.max_mute_time <= 0:
             raise RegulatorLimitExceededError(
-                f"🚫 Ваша должность <b>«{regulator.title}»</b> не наделена правом ограничивать речь граждан (выдавать мут)."
+                f"🚫 Ваша должность <b>«{regulator.title}»</b> не наделена правом мута граждан."
             )
 
         if duration_seconds > regulator.max_mute_time:
             raise RegulatorLimitExceededError(
-                f"🚫 <b>Превышение лимита полномочий!</b>\n\n"
+                f"🚫 <b>Превышение полномочий мута!</b>\n\n"
                 f"Должность: <b>{regulator.title}</b>\n"
-                f"Максимальный допустимый мут: <b>{format_duration(regulator.max_mute_time)}</b>\n"
-                f"Запрошено: <b>{format_duration(duration_seconds)}</b>."
+                f"Максимальный срок мута: <b>{format_duration(regulator.max_mute_time)}</b>\n"
+                f"Запрошенный срок: <b>{format_duration(duration_seconds)}</b>."
             )
 
         return regulator
@@ -127,22 +127,23 @@ class RegulatorService:
 
         if regulator.max_fine_amount <= 0:
             raise RegulatorLimitExceededError(
-                f"🚫 Ваша должность <b>«{regulator.title}»</b> не наделена правом выписывать денежные штрафы."
+                f"🚫 Ваша должность <b>«{regulator.title}»</b> не наделена правом выписки штрафов."
             )
 
-        # Особый регламент для уровня 2 (Блюститель чата): штрафы только по разделу II
+        # Ограничение Блюстителя чата (ранг 2): только Раздел II (Чат)
         if issuer.role_level == PositionLevel.CHAT_WARDEN.value and not is_chat_section:
             raise RegulatorLimitExceededError(
-                f"🚫 Должность <b>«{regulator.title}»</b> имеет право выписывать штрафы "
-                f"<b>исключительно по статьям Раздела II (Чат Telegram)</b>!"
+                "🚫 <b>Ограничение полномочий!</b>\n\n"
+                "Блюститель чата вправе выписывать штрафы <b>ТОЛЬКО</b> по статьям "
+                "<b>Раздела II (Чат Telegram)</b>."
             )
 
         if amount > regulator.max_fine_amount:
             raise RegulatorLimitExceededError(
-                f"🚫 <b>Превышение лимита штрафа!</b>\n\n"
+                f"🚫 <b>Превышение максимальной суммы штрафа!</b>\n\n"
                 f"Должность: <b>{regulator.title}</b>\n"
-                f"Максимальный допустимый штраф: <b>{regulator.max_fine_amount:,} валюты</b>\n"
-                f"Запрошено: <b>{amount:,} валюты</b>."
+                f"Ваш лимит штрафа: <b>{regulator.max_fine_amount:,}</b> валюты\n"
+                f"Попытка выписать: <b>{amount:,}</b> валюты."
             )
 
         return regulator
@@ -177,11 +178,15 @@ class RegulatorService:
         if issuer.is_enemy:
             raise EnemyOfTownError()
 
+        # Владелец города (@DivniDed) обладает безусловным правом редактировать законы
+        if issuer.telegram_id == settings.OWNER_ID or (issuer.username and issuer.username.lower() == settings.OWNER_USERNAME.lower()):
+            return await cls.get_regulator(session, PositionLevel.SENIOR_ADMINISTRATION.value)
+
         regulator = await cls.get_regulator(session, issuer.role_level)
         if not regulator.can_edit_laws:
             raise RegulatorLimitExceededError(
                 f"🚫 Редактирование Городского Свода Законов разрешено "
-                f"только Администрации и Старшей администрации (уровни 4-5). "
+                f"только Высшей администрации города (уровень 5) и Владельцу. "
                 f"Ваша должность: <b>«{regulator.title}»</b>."
             )
         return regulator

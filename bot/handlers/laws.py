@@ -25,7 +25,7 @@ def get_rules_inline_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("закон"))
+@router.message(Command("закон", "law"))
 async def cmd_law(message: Message, session: AsyncSession):
     """
     Команда /закон [номер] — выдает карточку статьи Городского Свода Законов
@@ -58,7 +58,7 @@ async def cmd_law(message: Message, session: AsyncSession):
         await message.answer(e.message)
 
 
-@router.message(Command("законы"))
+@router.message(Command("законы", "laws"))
 async def cmd_laws_list(message: Message, session: AsyncSession):
     """
     Выводит полный канонический Свод Законов и регламентов города.
@@ -180,11 +180,11 @@ async def cmd_laws_list(message: Message, session: AsyncSession):
     await message.answer(part2, reply_markup=get_rules_inline_keyboard())
 
 
-@router.message(Command("закон_ред"))
+@router.message(Command("закон_ред", "edit_law", "law_edit"))
 async def cmd_law_edit(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /закон_ред [номер] [новый_текст]
-    Редактирование статьи закона. Доступно только Администрации (уровни 4-5).
+    Редактирование статьи закона. Доступно только Высшей Администрации (уровень 5 и Владелец).
     """
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
@@ -198,7 +198,7 @@ async def cmd_law_edit(message: Message, session: AsyncSession, db_user: User):
     new_text = args[2].strip()
 
     try:
-        # Проверка прав через сервис Регуляторов
+        # Проверка прав через сервис Регуляторов (Высшая администрация и Владелец)
         await RegulatorService.validate_edit_laws(session, db_user)
 
         law = await LawService.update_law_text(

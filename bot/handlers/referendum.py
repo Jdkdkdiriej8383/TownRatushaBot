@@ -15,7 +15,7 @@ router = Router(name="referendum_router")
 poll_client = PollBotClient()
 
 
-@router.message(Command("референдум"))
+@router.message(Command("референдум", "referendum"))
 async def cmd_referendum(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /референдум [номер_статьи] [новый_текст_поправки]
@@ -83,7 +83,7 @@ async def cmd_referendum(message: Message, session: AsyncSession, db_user: User)
         await message.answer(e.message)
 
 
-@router.message(Command("присяжные"))
+@router.message(Command("присяжные", "jury"))
 async def cmd_jury_trial(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /присяжные @юзер [номер_статьи] [суть_обвинения]

@@ -9,11 +9,12 @@ from core.enums import PositionLevel, FineStatus
 from core.regulators import RegulatorService
 from core.exceptions import TownBaseException
 from bot.utils import extract_target_user
+from config import settings
 
 router = Router(name="passport_router")
 
 
-@router.message(Command("паспорт"))
+@router.message(Command("паспорт", "passport"))
 async def cmd_passport(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /паспорт — электронный паспорт гражданина города.
@@ -68,16 +69,59 @@ async def cmd_passport(message: Message, session: AsyncSession, db_user: User):
     await message.answer(passport_text)
 
 
-@router.message(Command("ник"))
+@router.message(Command("ник", "nick"))
 async def cmd_set_nick(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /ник [minecraft_ник] — привязка игрового никнейма в паспорте.
+    Администрация города (уровни 4-5) и Владелец могут принудительно привязать ник:
+    /ник @юзер [minecraft_ник] или ответом на сообщение /ник [minecraft_ник].
     """
+    raw_args = message.text.split()[1:]
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    # Если указан целевой пользователь (через @юзер или reply) и это не сам отправитель
+    if target_user and target_user.id != db_user.id:
+        if not is_admin:
+            await message.answer("🚫 Принудительно привязывать ники другим жителям может только Администрация города!")
+            return
+
+        if not remaining_args:
+            await message.answer(
+                "Использование для Администрации:\n"
+                "• <code>/ник @юзер [Minecraft_Ник]</code>\n"
+                "• Ответом на сообщение: <code>/ник [Minecraft_Ник]</code>"
+            )
+            return
+
+        new_nick = remaining_args[0].strip()
+        existing = await session.scalar(
+            select(User).where(User.minecraft_nick.ilike(new_nick), User.id != target_user.id)
+        )
+        if existing:
+            await message.answer(f"⚠️ Ник <code>{new_nick}</code> уже привязан к другому паспорту ({existing.full_name})!")
+            return
+
+        target_user.minecraft_nick = new_nick
+        await session.commit()
+        await message.answer(
+            f"✅ <b>Администрация принудительно привязала ник!</b>\n"
+            f"Гражданину <b>{target_user.full_name}</b> установлен Minecraft-ник: <code>{new_nick}</code>."
+        )
+        return
+
+    # Обычная привязка своего ника пользователем
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "Использование: <code>/ник [Ваш_Minecraft_Ник]</code>\n"
-            "Пример: <code>/ник Steve_Builder</code>"
+            "Пример: <code>/ник Steve_Builder</code>\n\n"
+            "<i>(Для Администрации: <code>/ник @юзер [Minecraft_Ник]</code>)</i>"
         )
         return
 
@@ -100,40 +144,46 @@ async def cmd_set_nick(message: Message, session: AsyncSession, db_user: User):
     )
 
 
-@router.message(Command("отпуск"))
+@router.message(Command("отпуск", "vacation"))
 async def cmd_vacation(message: Message, session: AsyncSession, db_user: User):
     """
-    Команда /отпуск [дней] — оформление статуса официального отпуска (п. 3.25).
-    Защищает постройки гражданина от сноса за неактивность.
+    Команда /отпуск [дней] — оформление статуса отпуска по п. 3.25 Городского Свода Законов.
+    Максимум 30 дней.
     """
-    args = message.text.split()
-    if len(args) < 2 or not args[1].isdigit():
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
         await message.answer(
-            "Использование: <code>/отпуск [число_дней (от 1 до 30)]</code>\n"
-            "Пример: <code>/отпуск 14</code>"
+            "Использование: <code>/отпуск [кол-во дней от 1 до 30]</code>\n"
+            "Пример: <code>/отпуск 14</code>\n\n"
+            "<i>Согласно ст. 3.25, статус отпуска защищает имущество жителя от изъятия при длительном оффлайне.</i>"
         )
         return
 
-    days = int(args[1])
-    if days < 1 or days > 30:
-        await message.answer("⚠️ Согласно ст. 3.25 срок отпуска может составлять от 1 до 30 дней.")
+    try:
+        days = int(args[1].strip())
+        if days < 1 or days > 30:
+            raise ValueError()
+    except ValueError:
+        await message.answer("⚠️ Срок отпуска должен быть числом от 1 до 30 дней!")
         return
 
     now = datetime.now(timezone.utc)
-    until = now + timedelta(days=days)
-
     db_user.on_vacation = True
-    db_user.vacation_until = until
+    db_user.vacation_until = now + timedelta(days=days)
     await session.commit()
 
+    until_str = db_user.vacation_until.strftime("%d.%m.%Y %H:%M")
     await message.answer(
-        f"🌴 <b>ОТПУСК ОФОРМЛЕН (ст. 3.25 Законов)</b>\n\n"
-        f"Срок: <b>{days} дней</b> (до {until.strftime('%d.%m.%Y %H:%M UTC')})\n"
-        f"Ваше городское имущество и недвижимость защищены от сноса и отчуждения!"
+        f"🌴 <b>ОТПУСК ОФОРМЛЕН (Статья 3.25)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Гражданин: <b>{db_user.full_name}</b>\n"
+        f"Срок отпуска: <b>{days} дн.</b> (до {until_str} UTC)\n"
+        f"Статус: <i>Ваш участок и имущество находятся под защитой закона на время отсутствия.</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
     )
 
 
-@router.message(Command("должность"))
+@router.message(Command("должность", "position"))
 async def cmd_set_position(message: Message, session: AsyncSession, db_user: User):
     """
     Команда /должность @юзер [0-5]
@@ -152,7 +202,7 @@ async def cmd_set_position(message: Message, session: AsyncSession, db_user: Use
             "2: Блюститель чата\n"
             "3: Старший блюститель\n"
             "4: Администрация\n"
-            "5: Старшая администрация"
+            "5: Высшая администрация"
         )
         return
 
