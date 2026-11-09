@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import User
 from core.enums import PositionLevel
 from config import settings
+from bot.commands import setup_bot_commands, BOT_COMMANDS
 
 router = Router(name="common_router")
 
@@ -64,6 +65,7 @@ async def cmd_help(message: Message, db_user: User):
         "• <code>/присяжные @юзер [номер] [обвинение]</code> — суд присяжных\n"
         "• <code>/регуляторы</code> — сводка прав и защит чата\n"
         "• <code>/антикапс</code>, <code>/спам</code>, <code>/ссылки</code> [вкл/выкл] — переключение фильтров\n"
+        "• <code>/обновить_меню</code> (<code>/sync_menu</code>) — синхронизация меню команд Telegram\n"
         "━━━━━━━━━━━━━━━━━━━━"
     )
     await message.answer(help_text)
@@ -129,3 +131,50 @@ async def cmd_summon_all(message: Message, session: AsyncSession, db_user: User)
         await message.bot.pin_chat_message(message.chat.id, sent.message_id)
     except Exception:
         pass
+
+
+@router.message(Command("обновить_меню", "sync_menu", "update_menu", "обновитьменю", "menu_sync"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("обновить_меню", "sync_menu", "update_menu", "обновитьменю", "/обновить_меню", "/sync_menu", "/update_menu", "/обновитьменю"))))
+async def cmd_sync_menu(message: Message, db_user: User):
+    """
+    Команда /обновить_меню (или /sync_menu) — принудительно обновляет меню команд в Telegram.
+    Доступна Администрации (уровни 4-5), Владельцу и создателям/администраторам групп.
+    """
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    if not is_admin and message.chat.type in ("group", "supergroup") and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.answer("🚫 Обновлять меню команд Telegram может только Администрация города!")
+        return
+
+    status_msg = await message.answer("⏳ <i>Синхронизация официального меню команд с серверами Telegram...</i>")
+    try:
+        count = await setup_bot_commands(message.bot)
+        await status_msg.edit_text(
+            "✅ <b>МЕНЮ КОМАНД TELEGRAM УСПЕШНО ОБНОВЛЕНО!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 Зарегистрировано команд: <b>{count}</b>\n"
+            "🌐 Области видимости:\n"
+            "  • По умолчанию (Default)\n"
+            "  • Личные сообщения (Private Chats)\n"
+            "  • Группы и Супергруппы (Group Chats)\n"
+            "  • Администраторы чатов (Chat Administrators)\n"
+            "🇷🇺 Языковые схемы: Default + RU\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Совет: если кнопка «Меню» или список команд при вводе «/» не обновились сразу, "
+            "перезапустите клиент Telegram или очистите его локальный кэш.</i>"
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ <b>Ошибка при обновлении меню команд:</b> {e}")
+

@@ -1,6 +1,12 @@
 import logging
 from aiogram import Bot
-from aiogram.types import BotCommand, BotCommandScopeDefault
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllChatAdministrators,
+)
 
 logger = logging.getLogger("townbot.commands")
 
@@ -21,6 +27,7 @@ BOT_COMMANDS = [
     BotCommand(command="amnesty", description="Городская амнистия (/амнистия)"),
     BotCommand(command="all", description="Созвать всех жителей в чате (/созвать)"),
     BotCommand(command="reprimand", description="Служебный выговор (/выговор)"),
+    BotCommand(command="unreprimand", description="Снять выговор (/снять_выговор)"),
     BotCommand(command="promote", description="Выдать права админа чата (/выдать_адм)"),
     BotCommand(command="demote", description="Снять права админа чата (/снять_адм)"),
     BotCommand(command="referendum", description="Общегородской референдум (/референдум)"),
@@ -29,16 +36,38 @@ BOT_COMMANDS = [
     BotCommand(command="anticaps", description="Регулятор антикапса (/антикапс)"),
     BotCommand(command="antispam", description="Регулятор медиа-спама (/спам)"),
     BotCommand(command="antilinks", description="Регулятор ссылок и рекламы (/ссылки)"),
+    BotCommand(command="sync_menu", description="Обновить меню команд (/обновить_меню)"),
 ]
 
 
-async def setup_bot_commands(bot: Bot) -> None:
+async def setup_bot_commands(bot: Bot) -> int:
     """
     Устанавливает официальное меню команд бота в интерфейсе Telegram (кнопка 'Меню' / '/').
-    Включает только реально существующие команды города.
+    Обновляет все области (Default, Личные чаты, Группы, Супергруппы, Администраторы)
+    и языковые коды (Default и RU), принудительно сбрасывая устаревший кэш Telegram.
+    Возвращает количество зарегистрированных команд.
     """
-    try:
-        await bot.set_my_commands(BOT_COMMANDS, scope=BotCommandScopeDefault())
-        logger.info("Меню команд Telegram успешно установлено (%d команд).", len(BOT_COMMANDS))
-    except Exception as e:
-        logger.warning("Не удалось установить меню команд Telegram: %s", e)
+    scopes = [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+    ]
+
+    for scope in scopes:
+        # Очищаем старые команды для данной области (сброс кэша)
+        try:
+            await bot.delete_my_commands(scope=scope)
+        except Exception as e:
+            logger.debug("Не удалось удалить старые команды для %s: %s", scope, e)
+
+        # Устанавливаем обновленный список команд (по умолчанию и для русской локали)
+        for lang in (None, "ru"):
+            try:
+                await bot.set_my_commands(BOT_COMMANDS, scope=scope, language_code=lang)
+            except Exception as e:
+                logger.debug("Не удалось установить команды для scope=%s lang=%s: %s", scope, lang, e)
+
+    logger.info("Меню команд Telegram успешно установлено во всех областях (%d команд).", len(BOT_COMMANDS))
+    return len(BOT_COMMANDS)
+

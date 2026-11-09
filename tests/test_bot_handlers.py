@@ -12,7 +12,7 @@ from bot.handlers.justice import (
     cmd_demote_admin,
 )
 from bot.handlers.passport import cmd_passport, cmd_set_nick
-from bot.handlers.common import cmd_summon_all
+from bot.handlers.common import cmd_summon_all, cmd_sync_menu
 from bot.handlers.regulators_admin import (
     cmd_toggle_anticaps,
     cmd_toggle_mediaspam,
@@ -240,14 +240,17 @@ async def test_cmd_regulators_toggle(db_session, sample_users):
 
 @pytest.mark.asyncio
 async def test_setup_bot_commands_menu():
-    """Тест установки меню команд Telegram."""
+    """Тест установки меню команд Telegram во всех областях и локалях."""
     bot_mock = MagicMock()
     bot_mock.set_my_commands = AsyncMock()
+    bot_mock.delete_my_commands = AsyncMock()
 
-    await setup_bot_commands(bot_mock)
+    count = await setup_bot_commands(bot_mock)
 
-    bot_mock.set_my_commands.assert_called_once()
-    commands_passed = bot_mock.set_my_commands.call_args[0][0]
+    assert count == len(BOT_COMMANDS)
+    assert bot_mock.delete_my_commands.called
+    assert bot_mock.set_my_commands.call_count >= 4
+    commands_passed = bot_mock.set_my_commands.call_args_list[0][0][0]
     assert len(commands_passed) == len(BOT_COMMANDS)
     command_names = [c.command for c in commands_passed]
     assert "all" in command_names
@@ -255,6 +258,38 @@ async def test_setup_bot_commands_menu():
     assert "laws" in command_names
     assert "regulators" in command_names
     assert "amnesty" in command_names
+    assert "reprimand" in command_names
+    assert "unreprimand" in command_names
+    assert "promote" in command_names
+    assert "demote" in command_names
+    assert "sync_menu" in command_names
+
+
+@pytest.mark.asyncio
+async def test_cmd_sync_menu_admin(sample_users):
+    """Тест команды /обновить_меню администратором города."""
+    admin = sample_users["admin"]
+
+    bot_mock = MagicMock()
+    bot_mock.set_my_commands = AsyncMock()
+    bot_mock.delete_my_commands = AsyncMock()
+
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+
+    message = MagicMock(spec=Message)
+    message.text = "/обновить_меню"
+    message.bot = bot_mock
+    message.answer = AsyncMock(return_value=status_msg)
+
+    await cmd_sync_menu(message, db_user=admin)
+
+    message.answer.assert_called_once()
+    status_msg.edit_text.assert_called_once()
+    reply = status_msg.edit_text.call_args[0][0]
+    assert "МЕНЮ КОМАНД TELEGRAM УСПЕШНО ОБНОВЛЕНО" in reply
+    assert f"{len(BOT_COMMANDS)}" in reply
+
 
 
 @pytest.mark.asyncio
