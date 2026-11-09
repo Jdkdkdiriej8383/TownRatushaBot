@@ -582,6 +582,9 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0):
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                if 'postgresql' in settings.DATABASE_URL:
+                    from sqlalchemy import text
+                    await conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS reprimands_count INTEGER DEFAULT 0'))
             break
         except Exception as e:
             if attempt == max_retries:

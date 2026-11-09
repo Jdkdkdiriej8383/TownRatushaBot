@@ -38,6 +38,7 @@ class User(Base):
 
     # Счетчики нарушений
     warns_count: Mapped[int] = mapped_column(Integer, default=0)
+    reprimands_count: Mapped[int] = mapped_column(Integer, default=0)  # Служебные выговоры (при 3/3 - отстранение)
 
     # Временные метки
     created_at: Mapped[datetime] = mapped_column(
@@ -75,4 +76,4 @@ class User(Base):
         return not self.is_enemy and self.role_level >= PositionLevel.CITIZEN
 
     def __repr__(self) -> str:
-        return f"<User tg={self.telegram_id} nick={self.minecraft_nick} role={self.role_level}>"
+        return f"<User tg={self.telegram_id} nick={self.minecraft_nick} role={self.role_level} rep={self.reprimands_count}>"

@@ -63,6 +63,7 @@ async def cmd_passport(message: Message, session: AsyncSession, db_user: User):
         f"🏖 <b>Статус отпуска (п. 3.25):</b> {vacation_info}\n"
         f"💰 <b>Задолженность по штрафам:</b> <code>{total_debt:,}</code> валюты\n"
         f"⚠️ <b>Предупреждений:</b> {user.warns_count}\n"
+        f"📋 <b>Служебных выговоров:</b> {getattr(user, 'reprimands_count', 0)}/3\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>Паспорт зарегистрирован в Городской Ратуше.</i>"
     )

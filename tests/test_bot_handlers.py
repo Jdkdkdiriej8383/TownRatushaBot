@@ -3,7 +3,14 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from aiogram.types import Message, User as TgUser, Chat
 from bot.handlers.laws import cmd_law, cmd_law_edit
-from bot.handlers.justice import cmd_fine, cmd_amnesty
+from bot.handlers.justice import (
+    cmd_fine,
+    cmd_amnesty,
+    cmd_reprimand,
+    cmd_unreprimand,
+    cmd_promote_admin,
+    cmd_demote_admin,
+)
 from bot.handlers.passport import cmd_passport, cmd_set_nick
 from bot.handlers.common import cmd_summon_all
 from bot.handlers.regulators_admin import (
@@ -356,3 +363,185 @@ async def test_cmd_amnesty_citizen_forbidden(db_session, sample_users):
     message.answer.assert_called_once()
     reply = message.answer.call_args[0][0]
     assert "только Администрация" in reply
+
+
+@pytest.mark.asyncio
+async def test_cmd_reprimand_progression_and_auto_dismissal(db_session, sample_users):
+    """
+    Тест системы выговоров /выговор:
+    1-й выговор -> счетчик 1/3
+    2-й выговор -> счетчик 2/3
+    3-й выговор -> автоматическое отстранение от должности (роль 0),
+                  обнуление счетчика выговоров,
+                  снятие Telegram-прав администратора в супергруппе.
+    """
+    admin = sample_users["admin"]
+    warden = sample_users["chat_warden"]
+    assert warden.role_level == PositionLevel.CHAT_WARDEN.value
+    assert warden.reprimands_count == 0
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100555
+    chat.promote = AsyncMock()
+
+    # 1. Первый выговор
+    msg1 = MagicMock(spec=Message)
+    msg1.chat = chat
+    msg1.from_user = MagicMock(id=admin.telegram_id)
+    msg1.text = f"/выговор @{warden.username} Опоздание на дежурство"
+    msg1.reply_to_message = None
+    msg1.answer = AsyncMock()
+    msg1.bot = None
+
+    await cmd_reprimand(msg1, db_session, db_user=admin)
+    msg1.answer.assert_called_once()
+    assert "1 / 3" in msg1.answer.call_args[0][0]
+    assert warden.reprimands_count == 1
+    assert warden.role_level == PositionLevel.CHAT_WARDEN.value
+
+    # 2. Второй выговор
+    msg2 = MagicMock(spec=Message)
+    msg2.chat = chat
+    msg2.from_user = MagicMock(id=admin.telegram_id)
+    msg2.text = f"/выговор @{warden.username} Невыполнение распоряжения"
+    msg2.reply_to_message = None
+    msg2.answer = AsyncMock()
+    msg2.bot = None
+
+    await cmd_reprimand(msg2, db_session, db_user=admin)
+    msg2.answer.assert_called_once()
+    assert "2 / 3" in msg2.answer.call_args[0][0]
+    assert warden.reprimands_count == 2
+    assert warden.role_level == PositionLevel.CHAT_WARDEN.value
+
+    # 3. Третий выговор -> Отстранение от должности
+    msg3 = MagicMock(spec=Message)
+    msg3.chat = chat
+    msg3.from_user = MagicMock(id=admin.telegram_id)
+    msg3.text = f"/выговор @{warden.username} Грубое нарушение устава"
+    msg3.reply_to_message = None
+    msg3.answer = AsyncMock()
+    msg3.bot = None
+
+    await cmd_reprimand(msg3, db_session, db_user=admin)
+    msg3.answer.assert_called_once()
+    reply3 = msg3.answer.call_args[0][0]
+    assert "СЛУЖЕБНОЕ ОТСТРАНЕНИЕ ОТ ДОЛЖНОСТИ" in reply3
+    assert "3/3" in reply3
+    assert warden.role_level == PositionLevel.CITIZEN.value
+    assert warden.reprimands_count == 0
+    chat.promote.assert_called_once_with(
+        user_id=warden.telegram_id,
+        can_manage_chat=False,
+        can_change_info=False,
+        can_delete_messages=False,
+        can_invite_users=False,
+        can_restrict_members=False,
+        can_pin_messages=False,
+        can_promote_members=False,
+        can_manage_video_chats=False,
+        can_post_stories=False,
+        can_edit_stories=False,
+        can_delete_stories=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cmd_reprimand_subordination(db_session, sample_users):
+    """Тест субординации при выговорах: нельзя выносить равному или старшему."""
+    assistant = sample_users["assistant"]  # уровень 1
+    warden = sample_users["chat_warden"]    # уровень 2
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100555
+    chat.get_member = AsyncMock(return_value=MagicMock(status="member"))
+
+    # Помощник (ур 1) пытается объявить выговор блюстителю (ур 2)
+    msg = MagicMock(spec=Message)
+    msg.chat = chat
+    msg.from_user = MagicMock(id=assistant.telegram_id)
+    msg.text = f"/выговор @{warden.username} Превышение полномочий"
+    msg.reply_to_message = None
+    msg.answer = AsyncMock()
+
+    await cmd_reprimand(msg, db_session, db_user=assistant)
+    msg.answer.assert_called_once()
+    assert "только Администрация" in msg.answer.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_cmd_unreprimand(db_session, sample_users):
+    """Тест команды /снять_выговор: уменьшает счетчик выговоров на 1."""
+    admin = sample_users["admin"]
+    warden = sample_users["chat_warden"]
+    warden.reprimands_count = 2
+    await db_session.commit()
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100555
+
+    msg = MagicMock(spec=Message)
+    msg.chat = chat
+    msg.from_user = MagicMock(id=admin.telegram_id)
+    msg.text = f"/снять_выговор @{warden.username} Примерное поведение"
+    msg.reply_to_message = None
+    msg.answer = AsyncMock()
+
+    await cmd_unreprimand(msg, db_session, db_user=admin)
+    msg.answer.assert_called_once()
+    reply = msg.answer.call_args[0][0]
+    assert "СЛУЖЕБНЫЙ ВЫГОВОР АННУЛИРОВАН" in reply
+    assert "1 / 3" in reply
+    assert warden.reprimands_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cmd_promote_and_demote_admin(db_session, sample_users):
+    """Тест команд /выдать_адм и /снять_адм для управления правами в чате."""
+    admin = sample_users["admin"]
+    warden = sample_users["chat_warden"]
+
+    chat = MagicMock(spec=Chat)
+    chat.type = "supergroup"
+    chat.id = -100555
+    chat.promote = AsyncMock()
+    chat.set_administrator_custom_title = AsyncMock()
+
+    # 1. /выдать_адм
+    msg_prom = MagicMock(spec=Message)
+    msg_prom.chat = chat
+    msg_prom.from_user = MagicMock(id=admin.telegram_id)
+    msg_prom.text = f"/выдать_адм @{warden.username} Капитан"
+    msg_prom.reply_to_message = None
+    msg_prom.answer = AsyncMock()
+    msg_prom.bot = None
+
+    await cmd_promote_admin(msg_prom, db_session, db_user=admin)
+    msg_prom.answer.assert_called_once()
+    assert "НАЗНАЧЕНИЕ АДМИНИСТРАТОРА ЧАТА" in msg_prom.answer.call_args[0][0]
+    chat.promote.assert_called_once()
+    assert chat.promote.call_args[1]["can_manage_chat"] is True
+    chat.set_administrator_custom_title.assert_called_once_with(
+        user_id=warden.telegram_id,
+        custom_title="Капитан",
+    )
+
+    # 2. /снять_адм
+    chat.promote.reset_mock()
+    msg_dem = MagicMock(spec=Message)
+    msg_dem.chat = chat
+    msg_dem.from_user = MagicMock(id=admin.telegram_id)
+    msg_dem.text = f"/снять_адм @{warden.username} Ротация кадров"
+    msg_dem.reply_to_message = None
+    msg_dem.answer = AsyncMock()
+    msg_dem.bot = None
+
+    await cmd_demote_admin(msg_dem, db_session, db_user=admin)
+    msg_dem.answer.assert_called_once()
+    assert "ОТЗЫВ ПРАВ АДМИНИСТРАТОРА ЧАТА" in msg_dem.answer.call_args[0][0]
+    chat.promote.assert_called_once()
+    assert chat.promote.call_args[1]["can_manage_chat"] is False
+

@@ -272,6 +272,7 @@ async def cmd_dossier(message: Message, session: AsyncSession, db_user: User):
         f"🎖 <b>Должность:</b> <b>{target_user.position_title}</b> (Уровень {target_user.role_level})",
         f"🏖 <b>Служебный статус:</b> {vacation_status}",
         f"⚠️ <b>Предупреждений:</b> {target_user.warns_count}",
+        f"📋 <b>Служебных выговоров:</b> {getattr(target_user, 'reprimands_count', 0)}/3",
         f"━━━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -338,7 +339,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
     Команда /амнистия @юзер [причина] (или /amnesty, или ответом на сообщение нарушителя,
     или /амнистия все для общегородской амнистии).
     Полное прощение нарушений:
-    - Обнуление предупреждений (варнов)
+    - Обнуление предупреждений (варнов) и служебных выговоров
     - Аннулирование активных/просроченных штрафов (статус cancelled)
     - Снятие розыска (is_wanted = False)
     - Восстановление из статуса «Враг города» (is_enemy = False, возврат статуса Гражданина)
@@ -377,13 +378,14 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
         for f in all_fines:
             f.status = FineStatus.CANCELLED.value
 
-        # Снимаем варны и розыск со всех граждан
+        # Снимаем варны, выговоры и розыск со всех граждан
         users_res = await session.scalars(
-            select(User).where((User.warns_count > 0) | (User.is_wanted.is_(True)))
+            select(User).where((User.warns_count > 0) | (User.reprimands_count > 0) | (User.is_wanted.is_(True)))
         )
         affected_users = list(users_res.all())
         for u in affected_users:
             u.warns_count = 0
+            u.reprimands_count = 0
             u.is_wanted = False
 
         await session.commit()
@@ -393,7 +395,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
             session=session,
             target_user=db_user,
             issuer_user=db_user,
-            punishment_type="амнистия",
+            punishment_type=PunishmentType.AMNESTY,
             law_article=None,
             duration_seconds=None,
             reason=f"Всеобщая амнистия: {manifest_text}",
@@ -405,7 +407,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
             f"🏛 <b>Инициатор:</b> {db_user.full_name} ({db_user.position_title})\n"
             f"📝 <b>Манифест:</b> {manifest_text}\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ Обнулены предупреждения у <b>{len(affected_users)}</b> жителей\n"
+            f"✅ Обнулены предупреждения и выговоры у <b>{len(affected_users)}</b> жителей\n"
             f"✅ Аннулировано <b>{len(all_fines)}</b> открытых штрафов казны\n"
             "✅ Сняты все ориентировки городского розыска\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -431,7 +433,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
             "• <code>/амнистия [telegram_id / ник] [причина]</code>\n"
             "• Ответом на сообщение: <code>/амнистия [причина]</code>\n"
             "• Всеобщая амнистия: <code>/амнистия все [манифест]</code>\n\n"
-            "<i>Амнистия снимает предупреждения, списывает штрафы, снимает розыск, "
+            "<i>Амнистия снимает предупреждения, выговоры, списывает штрафы, снимает розыск, "
             "восстанавливает гражданские права и разблокирует в чате.</i>"
         )
         return
@@ -439,7 +441,9 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
     reason = " ".join(remaining_args).strip() if remaining_args else "Городская амнистия и помилование"
 
     old_warns = target_user.warns_count
+    old_reps = getattr(target_user, "reprimands_count", 0)
     target_user.warns_count = 0
+    target_user.reprimands_count = 0
     target_user.is_wanted = False
 
     was_enemy = target_user.is_enemy
@@ -489,7 +493,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
         session=session,
         target_user=target_user,
         issuer_user=db_user,
-        punishment_type="амнистия",
+        punishment_type=PunishmentType.AMNESTY,
         law_article=None,
         duration_seconds=None,
         reason=f"Городская амнистия: {reason}",
@@ -497,6 +501,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
     await session.commit()
 
     enemy_line = "✅ Снят статус «Враг города» (гражданство восстановлено)\n" if was_enemy else ""
+    reps_line = f"✅ Аннулировано выговоров: <b>{old_reps}</b>\n" if old_reps > 0 else ""
 
     verdict_card = (
         "🕊 <b>АКТ ГОРОДСКОЙ АМНИСТИИ</b>\n"
@@ -506,6 +511,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
         f"📝 <b>Основание:</b> {reason}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"✅ Аннулировано предупреждений: <b>{old_warns}</b>\n"
+        f"{reps_line}"
         f"✅ Списано непогашенных штрафов: <b>{len(user_fines)}</b>\n"
         "✅ Снят статус розыска\n"
         f"{enemy_line}"
@@ -518,5 +524,391 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
     if settings.LOG_CHAT_ID and message.bot:
         try:
             await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=verdict_card)
+        except Exception:
+            pass
+
+
+@router.message(Command("выговор", "reprimand"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("выговор", "reprimand", "/выговор", "/reprimand"))))
+async def cmd_reprimand(message: Message, session: AsyncSession, db_user: User):
+    """
+    Команда /выговор @юзер [причина] (или /reprimand, или ответом на сообщение служащего)
+    Вынесение официального выговора. При получении 3 выговоров (3/3)
+    бот автоматически отстраняет от должности (понижает до Гражданина)
+    и отзывает права администратора чата.
+    """
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    if not is_admin and message.chat.type in ("group", "supergroup") and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.answer("🚫 Объявлять служебный выговор может только Администрация города (уровни 4-5) и Владелец!")
+        return
+
+    raw_args = message.text.split()[1:] if message.text else []
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.answer(
+            "⚠️ <b>СЛУЖЕБНЫЙ ВЫГОВОР</b>\n\n"
+            "Использование:\n"
+            "• <code>/выговор @юзер [причина]</code>\n"
+            "• <code>/выговор [telegram_id / ник] [причина]</code>\n"
+            "• Ответом на сообщение служащего: <code>/выговор [причина]</code>\n\n"
+            "<i>При получении 3-го выговора бот автоматически отстраняет служащего от должности и лишает полномочий.</i>"
+        )
+        return
+
+    if db_user.id == target_user.id:
+        await message.answer("🤷 Нельзя выносить выговор самому себе!")
+        return
+
+    if target_user.telegram_id == settings.OWNER_ID or (target_user.username and target_user.username.lower() == settings.OWNER_USERNAME.lower()):
+        await message.answer("🚫 Овнер города обладает абсолютным иммунитетом от взысканий!")
+        return
+
+    is_owner = (db_user.telegram_id == settings.OWNER_ID or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower()))
+    if not is_owner and db_user.role_level <= target_user.role_level:
+        await message.answer("🚫 Нарушение субординации: нельзя выносить выговор равному или старшему по должности!")
+        return
+
+    reason = " ".join(remaining_args).strip() if remaining_args else "Служебное несоответствие и нарушение регламента"
+
+    target_user.reprimands_count = getattr(target_user, "reprimands_count", 0) + 1
+
+    if target_user.reprimands_count < 3:
+        await LawService.log_punishment(
+            session=session,
+            target_user=target_user,
+            issuer_user=db_user,
+            punishment_type=PunishmentType.REPRIMAND,
+            law_article=None,
+            duration_seconds=None,
+            reason=f"Служебный выговор ({target_user.reprimands_count}/3): {reason}",
+        )
+        await session.commit()
+
+        card = (
+            "⚠️ <b>ОФИЦИАЛЬНЫЙ СЛУЖЕБНЫЙ ВЫГОВОР</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Служащий:</b> {target_user.full_name} (@{target_user.username or '—'})\n"
+            f"🎖 <b>Должность:</b> {target_user.position_title} (Уровень {target_user.role_level})\n"
+            f"👮 <b>Вынес выговор:</b> {db_user.full_name} ({db_user.position_title})\n"
+            f"📝 <b>Причина:</b> {reason}\n"
+            f"📊 <b>Выговоры:</b> <b>{target_user.reprimands_count} / 3</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>Внимание: при получении 3-го выговора служащий автоматически отстраняется от занимаемой должности!</i>"
+        )
+        await message.answer(card)
+
+        if settings.LOG_CHAT_ID and message.bot:
+            try:
+                await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=card)
+            except Exception:
+                pass
+        return
+
+    # 3-й выговор -> Автоматическое отстранение от должности
+    old_title = target_user.position_title
+    old_level = target_user.role_level
+    target_user.role_level = PositionLevel.CITIZEN.value
+    target_user.reprimands_count = 0  # Сброс счетчика после отстранения
+
+    # Отзываем права Telegram-администратора, если бот в супергруппе
+    if message.chat.type in ("group", "supergroup"):
+        try:
+            await message.chat.promote(
+                user_id=target_user.telegram_id,
+                can_manage_chat=False,
+                can_change_info=False,
+                can_delete_messages=False,
+                can_invite_users=False,
+                can_restrict_members=False,
+                can_pin_messages=False,
+                can_promote_members=False,
+                can_manage_video_chats=False,
+                can_post_stories=False,
+                can_edit_stories=False,
+                can_delete_stories=False,
+            )
+        except Exception as e:
+            logger.debug("Не удалось разжаловать в чате: %s", e)
+
+    await LawService.log_punishment(
+        session=session,
+        target_user=target_user,
+        issuer_user=db_user,
+        punishment_type=PunishmentType.DISMISSAL,
+        law_article=None,
+        duration_seconds=None,
+        reason=f"Отстранение от должности за 3/3 выговоров: {reason}",
+    )
+    await session.commit()
+
+    card = (
+        "🚨 <b>СЛУЖЕБНОЕ ОТСТРАНЕНИЕ ОТ ДОЛЖНОСТИ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Служащий:</b> {target_user.full_name} (@{target_user.username or '—'})\n"
+        f"🎖 <b>Бывшая должность:</b> {old_title} (Уровень {old_level})\n"
+        f"👮 <b>Вынес 3-й выговор:</b> {db_user.full_name} ({db_user.position_title})\n"
+        f"📝 <b>Причина:</b> {reason}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "❌ <b>Лимит выговоров исчерпан (3/3)!</b>\n"
+        f"⚡ <b>РЕШЕНИЕ:</b> Гражданин <b>{target_user.full_name}</b> отстранен от должности <b>«{old_title}»</b> и переведен в статус <b>Гражданина</b> (Уровень 0).\n"
+        "🔒 Полномочия блюстителя порядка и администратора отозваны.\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Запись о служебном несоответствии внесена в протокол Ратуши.</i>"
+    )
+    await message.answer(card)
+
+    if settings.LOG_CHAT_ID and message.bot:
+        try:
+            await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=card)
+        except Exception:
+            pass
+
+
+@router.message(Command("снять_выговор", "unreprimand", "снятьвыговор"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("снять_выговор", "unreprimand", "снятьвыговор", "/снять_выговор", "/unreprimand", "/снятьвыговор"))))
+async def cmd_unreprimand(message: Message, session: AsyncSession, db_user: User):
+    """
+    Команда /снять_выговор @юзер [причина] — аннулирование одного служебного выговора.
+    Доступно Администрации (уровни 4-5) и Владельцу.
+    """
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    if not is_admin and message.chat.type in ("group", "supergroup") and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.answer("🚫 Снимать выговоры вправе только Администрация города (уровни 4-5) и Владелец!")
+        return
+
+    raw_args = message.text.split()[1:] if message.text else []
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.answer(
+            "Использование: <code>/снять_выговор @юзер [причина]</code>\n"
+            "или ответом на сообщение служащего: <code>/снять_выговор [причина]</code>"
+        )
+        return
+
+    current_reps = getattr(target_user, "reprimands_count", 0)
+    if current_reps <= 0:
+        await message.answer(f"ℹ️ У служащего <b>{target_user.full_name}</b> нет активных выговоров (0/3).")
+        return
+
+    target_user.reprimands_count = current_reps - 1
+    reason = " ".join(remaining_args).strip() if remaining_args else "Ходатайство руководства / исправление"
+
+    await LawService.log_punishment(
+        session=session,
+        target_user=target_user,
+        issuer_user=db_user,
+        punishment_type="снятие выговора",
+        law_article=None,
+        duration_seconds=None,
+        reason=f"Снят выговор: {reason}",
+    )
+    await session.commit()
+
+    await message.answer(
+        f"✅ <b>СЛУЖЕБНЫЙ ВЫГОВОР АННУЛИРОВАН</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Служащий:</b> {target_user.full_name} (@{target_user.username or '—'})\n"
+        f"🏛 <b>Снял выговор:</b> {db_user.full_name} ({db_user.position_title})\n"
+        f"📝 <b>Основание:</b> {reason}\n"
+        f"📊 <b>Текущие выговоры:</b> <b>{target_user.reprimands_count} / 3</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+@router.message(Command("выдать_адм", "дать_адм", "promote", "makeadmin", "админ"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("выдать_адм", "дать_адм", "promote", "makeadmin", "админ", "/выдать_адм", "/дать_адм", "/promote", "/makeadmin", "/админ"))))
+async def cmd_promote_admin(message: Message, session: AsyncSession, db_user: User):
+    """
+    Команда /выдать_адм @юзер [титул] (или /promote)
+    Выдача прав администратора чата Telegram.
+    Доступно Администрации (уровни 4-5), Владельцу и создателю/администраторам супергруппы.
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("⚠️ Выдача прав администратора возможна только в групповых чатах города!")
+        return
+
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    if not is_admin and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.answer("🚫 Назначать администраторов чата вправе только Администрация города и Владелец!")
+        return
+
+    raw_args = message.text.split()[1:] if message.text else []
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.answer(
+            "Использование:\n"
+            "• <code>/выдать_адм @юзер [титул]</code>\n"
+            "• Ответом на сообщение: <code>/выдать_адм [титул]</code>"
+        )
+        return
+
+    custom_title = " ".join(remaining_args).strip()[:16] if remaining_args else target_user.position_title[:16]
+
+    try:
+        await message.chat.promote(
+            user_id=target_user.telegram_id,
+            can_manage_chat=True,
+            can_delete_messages=True,
+            can_manage_video_chats=True,
+            can_restrict_members=True,
+            can_pin_messages=True,
+            can_invite_users=True,
+            can_promote_members=False,
+            can_change_info=False,
+        )
+        try:
+            await message.chat.set_administrator_custom_title(
+                user_id=target_user.telegram_id,
+                custom_title=custom_title
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        await message.answer(
+            f"⚠️ <b>Ошибка при назначении в Telegram:</b> {e}\n\n"
+            f"<i>Убедитесь, что у бота в Telegram включено право «Добавление администраторов» (Add Admins)!</i>"
+        )
+        return
+
+    card = (
+        "👑 <b>НАЗНАЧЕНИЕ АДМИНИСТРАТОРА ЧАТА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Служащий:</b> {target_user.full_name} (@{target_user.username or '—'})\n"
+        f"🎖 <b>Должность в городе:</b> {target_user.position_title}\n"
+        f"🏛 <b>Назначил:</b> {db_user.full_name} ({db_user.position_title})\n"
+        f"🏷 <b>Титул в чате:</b> {custom_title}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ Права администратора чата Telegram успешно предоставлены!"
+    )
+    await message.answer(card)
+
+    if settings.LOG_CHAT_ID and message.bot:
+        try:
+            await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=card)
+        except Exception:
+            pass
+
+
+@router.message(Command("снять_адм", "забрать_адм", "demote", "разжаловать"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in ("снять_адм", "забрать_адм", "demote", "разжаловать", "/снять_адм", "/забрать_адм", "/demote", "/разжаловать"))))
+async def cmd_demote_admin(message: Message, session: AsyncSession, db_user: User):
+    """
+    Команда /снять_адм @юзер [причина] (или /demote)
+    Снятие прав администратора чата Telegram.
+    Доступно Администрации (уровни 4-5), Владельцу и создателю супергруппы.
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("⚠️ Снятие прав администратора возможно только в групповых чатах города!")
+        return
+
+    is_admin = (
+        db_user.role_level >= PositionLevel.ADMINISTRATION.value
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    )
+
+    if not is_admin and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.answer("🚫 Отзывать права администратора чата вправе только Администрация города и Владелец!")
+        return
+
+    raw_args = message.text.split()[1:] if message.text else []
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.answer(
+            "Использование:\n"
+            "• <code>/снять_адм @юзер [причина]</code>\n"
+            "• Ответом на сообщение: <code>/снять_адм [причина]</code>"
+        )
+        return
+
+    reason = " ".join(remaining_args).strip() if remaining_args else "Решение руководства города"
+
+    try:
+        await message.chat.promote(
+            user_id=target_user.telegram_id,
+            can_manage_chat=False,
+            can_change_info=False,
+            can_delete_messages=False,
+            can_invite_users=False,
+            can_restrict_members=False,
+            can_pin_messages=False,
+            can_promote_members=False,
+            can_manage_video_chats=False,
+            can_post_stories=False,
+            can_edit_stories=False,
+            can_delete_stories=False,
+        )
+    except Exception as e:
+        await message.answer(
+            f"⚠️ <b>Ошибка при отзыве прав в Telegram:</b> {e}\n\n"
+            f"<i>Убедитесь, что бот назначен создателем или администратором с правом управления админами.</i>"
+        )
+        return
+
+    card = (
+        "📉 <b>ОТЗЫВ ПРАВ АДМИНИСТРАТОРА ЧАТА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Пользователь:</b> {target_user.full_name} (@{target_user.username or '—'})\n"
+        f"🏛 <b>Отозвал права:</b> {db_user.full_name} ({db_user.position_title})\n"
+        f"📝 <b>Причина:</b> {reason}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ Права администратора чата Telegram успешно отозваны!"
+    )
+    await message.answer(card)
+
+    if settings.LOG_CHAT_ID and message.bot:
+        try:
+            await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=card)
         except Exception:
             pass
