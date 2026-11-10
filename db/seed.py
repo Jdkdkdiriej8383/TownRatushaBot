@@ -674,6 +674,9 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                     await conn.run_sync(Base.metadata.create_all)
                     if is_pg:
                         await conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS reprimands_count INTEGER DEFAULT 0'))
+                        await conn.execute(text("ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_destination VARCHAR(32) DEFAULT 'both'"))
+                        await conn.execute(text("ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_anonymous BOOLEAN DEFAULT FALSE"))
+                        await conn.execute(text("ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_topic_id BIGINT"))
             break
         except Exception as e:
             if attempt == max_retries:
@@ -719,12 +722,14 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                         telegram_id=settings.OWNER_ID,
                         username=settings.OWNER_USERNAME,
                         full_name="Овнер Ратуши",
-                        role_level=PositionLevel.SENIOR_ADMINISTRATION.value,
+                        role_level=PositionLevel.OWNER.value,
+                        custom_title="👑 Создатель / Владелец города",
                         is_enemy=False,
                     )
                 )
             else:
-                owner_user.role_level = PositionLevel.SENIOR_ADMINISTRATION.value
+                owner_user.role_level = PositionLevel.OWNER.value
+                owner_user.custom_title = "👑 Создатель / Владелец города"
                 owner_user.is_enemy = False
                 if not owner_user.username:
                     owner_user.username = settings.OWNER_USERNAME

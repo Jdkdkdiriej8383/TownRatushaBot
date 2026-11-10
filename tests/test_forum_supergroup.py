@@ -1,6 +1,7 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
 from db.models.report import Report
@@ -403,4 +404,150 @@ async def test_confidential_report_staff_visibility(db_session: AsyncSession, go
     # НЕ должны входить: Гражданин, Помощник
     assert "Гражданин" not in recipient_titles
     assert "Помощник" not in recipient_titles
+
+
+@pytest.mark.asyncio
+async def test_owner_rank_5_and_seniority(db_session: AsyncSession, gov_users):
+    """Проверка, что Владелец города имеет Ранг 5 и превосходит Мэра (Ранг 4)."""
+    from config import settings
+
+    owner = User(
+        telegram_id=settings.OWNER_ID,
+        username=settings.OWNER_USERNAME,
+        full_name="Создатель Ратуши",
+        role_level=PositionLevel.OWNER.value,
+    )
+    db_session.add(owner)
+    await db_session.commit()
+
+    assert owner.government_rank == 5
+    assert owner.position_title == "👑 Создатель / Владелец города"
+    assert HierarchyService.is_owner(owner) is True
+
+    # Старшинство над Мэром
+    mayor = gov_users["mayor"]
+    assert mayor.government_rank == 4
+    # Владелец может наказывать мэра
+    HierarchyService.validate_seniority(owner, mayor, "наказание")
+
+    # Мэр НЕ может наказывать Владельца
+    with pytest.raises(TownBaseException, match="Овнер города обладает абсолютным иммунитетом"):
+        HierarchyService.validate_seniority(mayor, owner, "наказание")
+
+
+@pytest.mark.asyncio
+async def test_report_without_reply_handler(db_session: AsyncSession, gov_users):
+    """Проверка подачи жалобы без ответа на сообщение: /report @username [причина]."""
+    from bot.handlers.reports import cmd_report
+    from db.models.chat_settings import ChatSettings
+
+    citizen = gov_users["citizen"]
+    warden = gov_users["warden"]
+
+    chat_settings = ChatSettings(chat_id=-100123, reports_destination="both")
+    db_session.add(chat_settings)
+    await db_session.commit()
+
+    # Имитируем сообщение /report @warden_sasha Оскорбления в чате
+    mock_msg = MagicMock()
+    mock_msg.chat.id = -100123
+    mock_msg.text = "/report @warden_sasha Оскорбления в чате"
+    mock_msg.reply_to_message = None
+    mock_msg.message_thread_id = 999
+    mock_msg.delete = AsyncMock()
+    mock_msg.answer = AsyncMock(return_value=MagicMock(message_id=555))
+    mock_msg.bot = MagicMock()
+    mock_msg.bot.send_message = AsyncMock(return_value=MagicMock(message_id=777))
+    mock_msg.entities = None
+
+    await cmd_report(message=mock_msg, session=db_session, db_user=citizen)
+
+    # Проверяем, что исходная команда удалена
+    mock_msg.delete.assert_called_once()
+
+    # Проверяем, что репорт создан в БД
+    rep_query = select(Report).where(Report.violator_id == warden.id)
+    created_rep = await db_session.scalar(rep_query)
+    assert created_rep is not None
+    assert created_rep.reason == "Оскорбления в чате"
+    assert created_rep.reporter_id == citizen.id
+    assert created_rep.message_id is None
+    assert "вне контекста" in created_rep.message_text
+
+
+@pytest.mark.asyncio
+async def test_report_settings_and_anonymity_toggle(db_session: AsyncSession, gov_users):
+    """Проверка работы меню настроек жалоб и переключения анонимности/маршрутизации."""
+    from bot.handlers.reports import cmd_report_settings, cb_report_settings
+    from db.models.chat_settings import ChatSettings
+
+    mayor = gov_users["mayor"]
+    chat_settings = ChatSettings(chat_id=-100999, reports_destination="both", reports_anonymous=False)
+    db_session.add(chat_settings)
+    await db_session.commit()
+
+    # 1. Открытие /report_settings Мэром
+    mock_msg = MagicMock()
+    mock_msg.chat.id = -100999
+    mock_msg.chat.type = "supergroup"
+    mock_msg.from_user.id = mayor.telegram_id
+    mock_msg.answer = AsyncMock()
+
+    await cmd_report_settings(message=mock_msg, session=db_session, db_user=mayor)
+    mock_msg.answer.assert_called_once()
+    assert "НАСТРОЙКИ СИСТЕМЫ ЖАЛОБ" in mock_msg.answer.call_args[0][0]
+
+    # 2. Callback переключения анонимности
+    mock_cb = MagicMock()
+    mock_cb.data = "rep_set:toggle_anon"
+    mock_cb.message.chat.id = -100999
+    mock_cb.message.message_thread_id = 12
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    await cb_report_settings(callback=mock_cb, session=db_session, db_user=mayor)
+    await db_session.refresh(chat_settings)
+    assert chat_settings.reports_anonymous is True
+
+    # 3. Callback переключения маршрутизации на "topic"
+    mock_cb.data = "rep_set:dest:topic"
+    await cb_report_settings(callback=mock_cb, session=db_session, db_user=mayor)
+    await db_session.refresh(chat_settings)
+    assert chat_settings.reports_destination == "topic"
+
+
+@pytest.mark.asyncio
+async def test_report_delivery_fallback_when_pm_fails(db_session: AsyncSession, gov_users):
+    """Проверка гарантированной доставки: если ЛС админов недоступны, жалоба падает в топик/чат."""
+    from bot.handlers.reports import cmd_report
+    from db.models.chat_settings import ChatSettings
+
+    citizen = gov_users["citizen"]
+    warden = gov_users["warden"]
+
+    chat_settings = ChatSettings(chat_id=-100888, reports_destination="pm")
+    db_session.add(chat_settings)
+    await db_session.commit()
+
+    mock_msg = MagicMock()
+    mock_msg.chat.id = -100888
+    mock_msg.text = "/report @warden_sasha Спам"
+    mock_msg.reply_to_message = None
+    mock_msg.message_thread_id = 42
+    mock_msg.delete = AsyncMock()
+    mock_msg.answer = AsyncMock(return_value=MagicMock(message_id=111))
+    mock_msg.entities = None
+
+    # Имитируем ошибку отправки в ЛС (Forbidden: bot can't initiate conversation)
+    mock_bot = MagicMock()
+    mock_bot.send_message = AsyncMock(side_effect=[Exception("TelegramForbiddenError"), MagicMock(message_id=888)])
+    mock_msg.bot = mock_bot
+
+    await cmd_report(message=mock_msg, session=db_session, db_user=citizen)
+
+    # Проверяем, что fallback вызвал отправку в топик/чат
+    assert mock_bot.send_message.call_count >= 2
+    last_call = mock_bot.send_message.call_args_list[-1]
+    assert "ЖАЛОБА #" in last_call.kwargs.get("text", "")
+
 

@@ -88,34 +88,40 @@ class User(Base):
 
     @property
     def government_rank(self) -> int:
-        """Государственный ранг (0 - Гражданин, 1 - Помощник, 2 - Блюститель, 3 - Администрация, 4 - Высшая администрация)."""
+        """Государственный ранг (0 - Гражданин, 1 - Помощник, 2 - Блюститель, 3 - Администрация, 4 - Высшая администрация, 5 - Создатель/Владелец)."""
+        from config import settings
+        if self.telegram_id == settings.OWNER_ID or (self.username and self.username.lower() == settings.OWNER_USERNAME.lower()) or self.role_level >= PositionLevel.OWNER.value:
+            return 5
         return PositionLevel.get_rank(self.role_level)
 
     @property
     def position_title(self) -> str:
+        from config import settings
+        if self.telegram_id == settings.OWNER_ID or (self.username and self.username.lower() == settings.OWNER_USERNAME.lower()) or self.role_level >= PositionLevel.OWNER.value:
+            return self.custom_title or "👑 Создатель / Владелец города"
         if self.is_enemy:
             return "Враг города"
         return self.custom_title or PositionLevel.get_title(self.role_level)
 
     @property
     def is_supreme_admin(self) -> bool:
-        return self.role_level >= PositionLevel.SENIOR_ADMINISTRATION.value
+        return self.government_rank >= 4 or self.role_level >= PositionLevel.SENIOR_ADMINISTRATION.value
 
     @property
     def is_middle_admin(self) -> bool:
-        return self.role_level >= PositionLevel.ADMINISTRATION.value
+        return self.government_rank >= 3 or self.role_level >= PositionLevel.ADMINISTRATION.value
 
     @property
     def is_warden_or_higher(self) -> bool:
-        return self.role_level >= PositionLevel.CHAT_WARDEN.value
+        return self.government_rank >= 2 or self.role_level >= PositionLevel.CHAT_WARDEN.value
 
     @property
     def is_staff(self) -> bool:
-        return not self.is_enemy and self.role_level >= PositionLevel.ASSISTANT.value
+        return not self.is_enemy and (self.government_rank >= 1 or self.role_level >= PositionLevel.ASSISTANT.value)
 
     @property
     def is_citizen_or_higher(self) -> bool:
-        return not self.is_enemy and self.role_level >= PositionLevel.CITIZEN.value
+        return not self.is_enemy and (self.government_rank >= 0 or self.role_level >= PositionLevel.CITIZEN.value)
 
     def __repr__(self) -> str:
         return f"<User tg={self.telegram_id} nick={self.minecraft_nick} role={self.role_level} title={self.position_title}>"

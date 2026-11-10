@@ -38,6 +38,7 @@ BOT_COMMANDS = [
     BotCommand(command="antispam", description="Регулятор медиа-спама (/спам)"),
     BotCommand(command="antilinks", description="Регулятор ссылок и рекламы (/ссылки)"),
     BotCommand(command="report", description="Подать жалобу на нарушителя (/репорт, !жб)"),
+    BotCommand(command="report_settings", description="Настройки системы жалоб (/настройки_жалоб)"),
     BotCommand(command="ticket_panel", description="Панель государственной приемной (/приемная)"),
     BotCommand(command="claim", description="Взять обращение в работу (/принять)"),
     BotCommand(command="transfer", description="Перенаправить обращение (/передать)"),

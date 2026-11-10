@@ -168,7 +168,7 @@ async def cmd_staff(message: Message, session: AsyncSession, db_user: User):
         await message.answer("ℹ️ Действующий состав администрации пока не назначен.")
         return
 
-    ranks_map: dict[int, list[User]] = {4: [], 3: [], 2: [], 1: []}
+    ranks_map: dict[int, list[User]] = {5: [], 4: [], 3: [], 2: [], 1: []}
     for m in staff_members:
         rank = m.government_rank
         if rank in ranks_map:
@@ -180,13 +180,14 @@ async def cmd_staff(message: Message, session: AsyncSession, db_user: User):
     ]
 
     rank_headers = {
-        4: "👑 <b>Ранг 4: Высшая администрация (Supreme Admins)</b>",
-        3: "🏛️ <b>Ранг 3: Администрация (Middle Admins)</b>",
+        5: "👑 <b>Ранг 5: Создатель и Владелец города (Founder)</b>",
+        4: "🏛 <b>Ранг 4: Высшая администрация (Supreme Admins)</b>",
+        3: "⚖️ <b>Ранг 3: Администрация (Middle Admins)</b>",
         2: "🛡️ <b>Ранг 2: Блюстители (Senior Moderators)</b>",
         1: "🔰 <b>Ранг 1: Помощники (Junior Moderators)</b>",
     }
 
-    for rank in [4, 3, 2, 1]:
+    for rank in [5, 4, 3, 2, 1]:
         members = ranks_map[rank]
         if not members:
             continue
@@ -199,7 +200,8 @@ async def cmd_staff(message: Message, session: AsyncSession, db_user: User):
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"👥 Всего должностных лиц на службе: <b>{len(staff_members)}</b>")
+    lines.append(f"👥 Всего должностных лиц на службе: <b>{len(staff_members)}</b>\n")
+    lines.append("💡 <i>Сотрудники должны открыть диалог с ботом в ЛС (/start), чтобы получать карточки жалоб персонально.</i>")
 
     await message.answer("\n".join(lines))
 

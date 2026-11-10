@@ -22,6 +22,10 @@ class HierarchyService:
             return True
         if user.username and user.username.lower() == settings.OWNER_USERNAME.lower():
             return True
+        if getattr(user, "role_level", 0) >= PositionLevel.OWNER.value:
+            return True
+        if getattr(user, "government_rank", 0) >= 5:
+            return True
         return False
 
     @classmethod

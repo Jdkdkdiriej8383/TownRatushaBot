@@ -32,7 +32,7 @@ class UserSyncMiddleware(BaseMiddleware):
                 event_from_user.id == settings.OWNER_ID or
                 (event_from_user.username and event_from_user.username.lower() == settings.OWNER_USERNAME.lower())
             )
-            initial_role = PositionLevel.SENIOR_ADMINISTRATION.value if is_owner else PositionLevel.CITIZEN.value
+            initial_role = PositionLevel.OWNER.value if is_owner else PositionLevel.CITIZEN.value
 
             if not user:
                 user = User(
@@ -50,9 +50,9 @@ class UserSyncMiddleware(BaseMiddleware):
                     user.username = event_from_user.username
                 if user.full_name != event_from_user.full_name:
                     user.full_name = event_from_user.full_name
-                # Если это Овнер, гарантируем максимальные полномочия
-                if is_owner and (user.role_level < PositionLevel.SENIOR_ADMINISTRATION.value or user.is_enemy):
-                    user.role_level = PositionLevel.SENIOR_ADMINISTRATION.value
+                # Если это Овнер, гарантируем максимальные полномочия (Ранг 5)
+                if is_owner and (user.role_level < PositionLevel.OWNER.value or user.is_enemy):
+                    user.role_level = PositionLevel.OWNER.value
                     user.is_enemy = False
 
             data["db_user"] = user

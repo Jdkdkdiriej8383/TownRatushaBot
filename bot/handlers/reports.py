@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Optional
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -11,6 +12,7 @@ from aiogram.types import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
+from db.models.chat_settings import ChatSettings
 from core.enums import PositionLevel, GovernmentRole, TopicType
 from core.report_service import ReportService
 from core.moderation_service import ModerationService
@@ -22,6 +24,68 @@ from config import settings
 
 logger = logging.getLogger("townbot.reports")
 router = Router(name="reports_router")
+
+
+async def _get_or_create_chat_settings(session: AsyncSession, chat_id: int) -> ChatSettings:
+    """Безопасно загружает или создает объект настроек чата."""
+    chat_settings = await session.scalar(
+        select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+    )
+    if not chat_settings:
+        chat_settings = ChatSettings(chat_id=chat_id)
+        session.add(chat_settings)
+        await session.flush()
+    return chat_settings
+
+
+def render_report_settings_text(chat_settings: ChatSettings, topic_name: str) -> str:
+    dest_map = {
+        "both": "⚡ В оба канала (Личные сообщения + Топик)",
+        "pm": "📬 Только в Личные сообщения (ЛС)",
+        "topic": "📌 Только в топик форума",
+    }
+    dest_str = dest_map.get(chat_settings.reports_destination, "⚡ В оба канала")
+    anon_str = "🟢 Включена (ник скрыт)" if chat_settings.reports_anonymous else "⚪ Отключена (ник виден)"
+
+    return (
+        "⚙️ <b>НАСТРОЙКИ СИСТЕМЫ ЖАЛОБ (REPORTS)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Маршрутизация:</b> {dest_str}\n"
+        f"• <b>Анонимность заявителя:</b> {anon_str}\n"
+        f"• <b>Топик для жалоб:</b> «{topic_name}»\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Сотрудники модерации (от Блюстителя и выше) должны начать диалог "
+        "с ботом в ЛС (/start), чтобы получать карточки жалоб персонально!</i>"
+    )
+
+
+def get_report_settings_keyboard(chat_settings: ChatSettings) -> InlineKeyboardMarkup:
+    cur_dest = chat_settings.reports_destination or "both"
+    anon_status = "ВЫКЛ ⚪" if not chat_settings.reports_anonymous else "ВКЛ 🟢"
+
+    b_both = f"{'✅ ' if cur_dest == 'both' else ''}⚡ ЛС + Топик"
+    b_pm = f"{'✅ ' if cur_dest == 'pm' else ''}📬 Только ЛС"
+    b_topic = f"{'✅ ' if cur_dest == 'topic' else ''}📌 Только Топик"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=b_both, callback_data="rep_set:dest:both"),
+                InlineKeyboardButton(text=b_pm, callback_data="rep_set:dest:pm"),
+                InlineKeyboardButton(text=b_topic, callback_data="rep_set:dest:topic"),
+            ],
+            [
+                InlineKeyboardButton(text=f"🥷 Анонимность: {anon_status}", callback_data="rep_set:toggle_anon"),
+            ],
+            [
+                InlineKeyboardButton(text="🎯 Назначить эту ветку топиком жалоб", callback_data="rep_set:bind_topic"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="rep_set:refresh"),
+                InlineKeyboardButton(text="❌ Закрыть", callback_data="rep_set:close"),
+            ],
+        ]
+    )
 
 
 def get_report_inline_keyboard(report_id: int) -> InlineKeyboardMarkup:
@@ -47,14 +111,121 @@ def get_report_inline_keyboard(report_id: int) -> InlineKeyboardMarkup:
     )
 
 
+@router.message(Command("report_settings", "настройки_жалоб", "reports_settings"))
+async def cmd_report_settings(message: Message, session: AsyncSession, db_user: User):
+    """
+    Панель управления системой жалоб:
+    - Выбор маршрутизации (ЛС / Топик / Оба)
+    - Переключение анонимности заявителя
+    - Привязка текущего топика
+    Доступно Администрации (Ранг 3+) и Овнеру города.
+    """
+    if not (
+        db_user.government_rank >= 3
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    ):
+        is_tg_admin = False
+        if message.chat.type in ("group", "supergroup") and message.from_user:
+            try:
+                member = await message.chat.get_member(message.from_user.id)
+                if getattr(member, "status", "") in ("creator", "administrator"):
+                    is_tg_admin = True
+            except Exception:
+                pass
+        if not is_tg_admin:
+            await message.answer("🚫 Доступ к настройкам жалоб открыт только для Администрации (Ранг 3+) и Овнера!")
+            return
+
+    chat_settings = await _get_or_create_chat_settings(session, message.chat.id)
+
+    topic_id = chat_settings.reports_topic_id
+    if topic_id is None:
+        topic_id = await TopicService.get_topic_thread_id(
+            session=session, chat_id=message.chat.id, topic_type=TopicType.REPORTS.value
+        )
+    topic_name = await TopicService.get_topic_name(session, message.chat.id, topic_id) if topic_id else "Не привязан (fallback)"
+
+    text = render_report_settings_text(chat_settings, topic_name)
+    kb = get_report_settings_keyboard(chat_settings)
+    await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("rep_set:"))
+async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_user: User):
+    if not (
+        db_user.government_rank >= 3
+        or db_user.telegram_id == settings.OWNER_ID
+        or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
+    ):
+        await callback.answer("🚫 У вас нет прав для изменения настроек жалоб!", show_alert=True)
+        return
+
+    chat_settings = await _get_or_create_chat_settings(session, callback.message.chat.id)
+    action = callback.data.split(":")[1]
+
+    if action == "dest":
+        dest_val = callback.data.split(":")[2]
+        chat_settings.reports_destination = dest_val
+        await session.commit()
+        await callback.answer(f"Маршрутизация изменена на: {dest_val}")
+
+    elif action == "toggle_anon":
+        chat_settings.reports_anonymous = not chat_settings.reports_anonymous
+        await session.commit()
+        state_str = "включена" if chat_settings.reports_anonymous else "отключена"
+        await callback.answer(f"Анонимность заявителя {state_str}")
+
+    elif action == "bind_topic":
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        if thread_id:
+            chat_settings.reports_topic_id = thread_id
+            await TopicService.set_topic_mapping(
+                session=session,
+                chat_id=callback.message.chat.id,
+                topic_type=TopicType.REPORTS.value,
+                thread_id=thread_id,
+                topic_name=f"Тема #{thread_id}",
+            )
+            await session.commit()
+            await callback.answer("✅ Текущая ветка форума назначена топиком жалоб!", show_alert=True)
+        else:
+            await callback.answer("⚠️ Выполните привязку внутри конкретной темы форума!", show_alert=True)
+
+    elif action == "close":
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
+
+    elif action == "refresh":
+        await callback.answer("Обновлено")
+
+    topic_id = chat_settings.reports_topic_id
+    if topic_id is None:
+        topic_id = await TopicService.get_topic_thread_id(
+            session=session, chat_id=callback.message.chat.id, topic_type=TopicType.REPORTS.value
+        )
+    topic_name = await TopicService.get_topic_name(session, callback.message.chat.id, topic_id) if topic_id else "Не привязан (fallback)"
+
+    text = render_report_settings_text(chat_settings, topic_name)
+    kb = get_report_settings_keyboard(chat_settings)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+
+
 @router.message(Command("report", "репорт", "жалоба"))
 @router.message(F.text.startswith("!жб") | F.text.startswith("!report"))
 async def cmd_report(message: Message, session: AsyncSession, db_user: User):
     """
-    Подача жалобы гражданином на сообщение нарушителя.
+    Подача жалобы гражданином:
+    1. Ответом на сообщение: /report [причина] (или !жб [причина])
+    2. По username или ID: /report @username [причина] или /report [id] [причина]
     Удаляет исходную команду, чтобы нарушитель не увидел факт доноса,
-    и конфиденциально направляет карточку инцидента должностям от Блюстителя и выше
-    (Блюстители, Министры, Зам. мэра, Мэр, Судьи, Конст. судья, Премьер-министр).
+    и конфиденциально направляет карточку инцидента должностям от Блюстителя и выше.
     """
     # 1. Сразу удаляем сообщение с командой заявителя (полная конфиденциальность)
     try:
@@ -62,41 +233,119 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
     except Exception:
         pass
 
-    if not message.reply_to_message:
-        # Уведомляем заявителя во временном исчезающем сообщении
-        hint = await message.answer(
-            "⚠️ Чтобы подать жалобу, ответьте командой <code>/report [причина]</code> (или <code>!жб [причина]</code>) "
-            "на сообщение нарушителя!"
-        )
+    raw_text = message.text or ""
+    tokens = raw_text.strip().split()
+
+    violator_res: Optional[User] = None
+    reported_text: Optional[str] = None
+    message_id: Optional[int] = None
+    reason: str = "Нарушение порядка"
+
+    if message.reply_to_message:
+        violator_tg_user = message.reply_to_message.from_user
+        if not violator_tg_user or violator_tg_user.is_bot:
+            hint = await message.answer("⚠️ Нельзя подать жалобу на бота или системное сообщение!")
+            asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=5.0))
+            return
+
+        violator_res = await session.scalar(select(User).where(User.telegram_id == violator_tg_user.id))
+        if not violator_res:
+            violator_res = User(
+                telegram_id=violator_tg_user.id,
+                username=violator_tg_user.username,
+                full_name=violator_tg_user.full_name,
+                role_level=PositionLevel.CITIZEN.value,
+            )
+            session.add(violator_res)
+            await session.commit()
+            await session.refresh(violator_res)
+
+        parts = raw_text.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
+            reason = parts[1].strip()
+
+        message_id = message.reply_to_message.message_id
+        reported_text = message.reply_to_message.text or message.reply_to_message.caption or "[Медиа-контент / стикер]"
+
+    else:
+        # Без реплая: /report @username [причина] или /report [tg_id] [причина]
+        if len(tokens) < 2:
+            hint = await message.answer(
+                "⚠️ <b>Укажите нарушителя для подачи жалобы:</b>\n"
+                "• <b>Ответом:</b> ответьте на сообщение нарушителя командой <code>/report [причина]</code>\n"
+                "• <b>По тегу:</b> <code>/report @username [причина]</code>\n"
+                "• <b>По ID:</b> <code>/report [telegram_id] [причина]</code>\n\n"
+                "<i>Команда и подсказка удаляются автоматически для обеспечения вашей безопасности.</i>"
+            )
+            asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=7.0))
+            return
+
+        target_token = tokens[1].strip()
+        reason = " ".join(tokens[2:]).strip() if len(tokens) > 2 else "Нарушение порядка"
+        reported_text = "[Жалоба на поведение пользователя вне контекста конкретного сообщения]"
+        message_id = None
+
+        # Проверяем text_mention из entities
+        if message.entities:
+            for ent in message.entities:
+                if ent.type == "text_mention" and ent.user:
+                    u_ent = ent.user
+                    violator_res = await session.scalar(select(User).where(User.telegram_id == u_ent.id))
+                    if not violator_res:
+                        violator_res = User(
+                            telegram_id=u_ent.id,
+                            username=u_ent.username,
+                            full_name=u_ent.full_name,
+                            role_level=PositionLevel.CITIZEN.value,
+                        )
+                        session.add(violator_res)
+                        await session.commit()
+                        await session.refresh(violator_res)
+                    break
+
+        if not violator_res and target_token.isdigit():
+            tg_id = int(target_token)
+            violator_res = await session.scalar(select(User).where(User.telegram_id == tg_id))
+            if not violator_res:
+                violator_res = User(
+                    telegram_id=tg_id,
+                    username=None,
+                    full_name=f"Гражданин {tg_id}",
+                    role_level=PositionLevel.CITIZEN.value,
+                )
+                session.add(violator_res)
+                await session.commit()
+                await session.refresh(violator_res)
+
+        if not violator_res and target_token.startswith("@"):
+            uname = target_token.lstrip("@").lower()
+            violator_res = await session.scalar(select(User).where(User.username.ilike(uname)))
+
+        if not violator_res:
+            violator_res = await session.scalar(
+                select(User).where(
+                    User.username.ilike(target_token) | User.minecraft_nick.ilike(target_token)
+                )
+            )
+
+        if not violator_res:
+            hint = await message.answer(
+                f"⚠️ Пользователь <b>{target_token}</b> не найден в базе данных чата!\n"
+                f"Ответьте на его сообщение командой <code>/report [причина]</code> "
+                f"или укажите его числовой Telegram ID."
+            )
+            asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=7.0))
+            return
+
+    if violator_res.telegram_id == db_user.telegram_id or violator_res.id == db_user.id:
+        hint = await message.answer("🤷 Нельзя подать жалобу на самого себя!")
         asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=5.0))
         return
-
-    violator_tg_user = message.reply_to_message.from_user
-    if not violator_tg_user or violator_tg_user.is_bot:
-        return
-
-    # Получаем/регистрируем нарушителя в БД
-    violator_res = await session.scalar(select(User).where(User.telegram_id == violator_tg_user.id))
-    if not violator_res:
-        violator_res = User(
-            telegram_id=violator_tg_user.id,
-            username=violator_tg_user.username,
-            full_name=violator_tg_user.full_name,
-            role_level=PositionLevel.CITIZEN.value,
-        )
-        session.add(violator_res)
-        await session.commit()
-        await session.refresh(violator_res)
-
-    # Парсим причину
-    text_content = message.text or ""
-    parts = text_content.split(maxsplit=1)
-    reason = parts[1].strip() if len(parts) > 1 else "Нарушение порядка"
 
     current_thread_id = getattr(message, "message_thread_id", None)
     incident_topic_name = await TopicService.get_topic_name(session, message.chat.id, current_thread_id)
 
-    reported_text = message.reply_to_message.text or message.reply_to_message.caption or "[Медиа-контент / стикер]"
+    chat_settings = await _get_or_create_chat_settings(session, message.chat.id)
 
     try:
         report = await ReportService.create_report(
@@ -105,7 +354,7 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
             violator=violator_res,
             incident_topic_id=current_thread_id,
             incident_topic_name=incident_topic_name,
-            message_id=message.reply_to_message.message_id,
+            message_id=message_id,
             message_text=reported_text,
             reason=reason,
             chat_id=message.chat.id,
@@ -115,11 +364,17 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
         asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=5.0))
         return
 
+    # Проверяем настройку анонимности
+    if chat_settings.reports_anonymous:
+        reporter_display = f"🥷 <i>Анонимный гражданин (Ранг {db_user.government_rank})</i>"
+    else:
+        reporter_display = f"@{db_user.username or '—'} (ID: <code>{db_user.telegram_id}</code>)"
+
     # Карточка жалобы строго для должностных лиц (от Блюстителя и выше)
     card = (
         f"🚨 <b>ЖАЛОБА #{report.id}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Заявитель:</b> @{db_user.username or '—'} (ID: <code>{db_user.telegram_id}</code>)\n"
+        f"• <b>Заявитель:</b> {reporter_display}\n"
         f"• <b>Нарушитель:</b> @{violator_res.username or '—'} (ID: <code>{violator_res.telegram_id}</code>)\n"
         f"• <b>Должность нарушителя:</b> {violator_res.position_title} (Ранг {violator_res.government_rank})\n"
         f"• <b>Тема инцидента:</b> «{incident_topic_name}»\n"
@@ -129,37 +384,53 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
         f"👮 <i>Ожидает рассмотрения дежурным Блюстителем или Администрацией.</i>"
     )
 
-    # 1. В чате нарушителя и группы пишем только тихое исчезающее подтверждение заявителю
+    # 1. В чате группы пишем только тихое исчезающее подтверждение заявителю
     confidential_hint = await message.answer(
         "🔒 <b>Жалоба принята конфиденциально!</b>\n"
         "Информация передана дежурным Блюстителям и Администрации города."
     )
     asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [confidential_hint.message_id], delay=5.0))
 
-    # 2. Находим всех сотрудников от Ранга 2 (Блюститель) и выше (Блюстители, Министры, Зам. мэра, Мэр, Судьи, Конст. судья, Премьер-министр) + Овнера
-    staff_query = select(User).where(
-        (User.role_level >= PositionLevel.CHAT_WARDEN.value) |
-        (User.telegram_id == settings.OWNER_ID)
-    )
-    staff_members = (await session.scalars(staff_query)).all()
+    dest = chat_settings.reports_destination or "both"
+    send_to_pm = dest in ("pm", "both")
+    send_to_topic = dest in ("topic", "both")
 
-    # 3. Отправляем интерактивную карточку в ЛИЧНЫЕ СООБЩЕНИЯ каждому сотруднику
     keyboard = get_report_inline_keyboard(report.id)
-    for staff in staff_members:
-        try:
-            await message.bot.send_message(
-                chat_id=staff.telegram_id,
-                text=card,
-                reply_markup=keyboard,
-            )
-        except Exception as e:
-            logger.debug("Не удалось отправить карточку жалобы в ЛС сотруднику %s: %s", staff.telegram_id, e)
+    pm_delivered_count = 0
 
-    # 4. Если настроен отдельный закрытый топик модерации (не совпадающий с общим чатом и темой инцидента)
-    reports_thread_id = await TopicService.get_topic_thread_id(
-        session=session, chat_id=message.chat.id, topic_type=TopicType.REPORTS.value
-    )
-    if reports_thread_id is not None and reports_thread_id != current_thread_id and reports_thread_id != settings.COMMUNITY_TOPIC_ID:
+    # 2. Отправка в ЛИЧНЫЕ СООБЩЕНИЯ сотрудникам модерации
+    if send_to_pm:
+        staff_query = select(User).where(
+            (User.role_level >= PositionLevel.CHAT_WARDEN.value) |
+            (User.telegram_id == settings.OWNER_ID)
+        )
+        staff_members = (await session.scalars(staff_query)).all()
+        for staff in staff_members:
+            try:
+                await message.bot.send_message(
+                    chat_id=staff.telegram_id,
+                    text=card,
+                    reply_markup=keyboard,
+                )
+                pm_delivered_count += 1
+            except Exception as e:
+                logger.warning("Не удалось отправить карточку жалобы в ЛС сотруднику %s: %s", staff.telegram_id, e)
+
+    # 3. Отправка в ТОПИК ЖАЛОБ
+    reports_thread_id = None
+    if chat_settings.reports_topic_id:
+        reports_thread_id = chat_settings.reports_topic_id
+    else:
+        reports_thread_id = await TopicService.get_topic_thread_id(
+            session=session, chat_id=message.chat.id, topic_type=TopicType.REPORTS.value
+        )
+        if reports_thread_id is None:
+            reports_thread_id = await TopicService.get_topic_thread_id(
+                session=session, chat_id=message.chat.id, topic_type=TopicType.ADMIN.value
+            )
+
+    topic_sent = False
+    if (send_to_topic or pm_delivered_count == 0) and reports_thread_id is not None:
         try:
             sent_card = await message.bot.send_message(
                 chat_id=message.chat.id,
@@ -169,8 +440,28 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
             )
             report.card_message_id = sent_card.message_id
             await session.commit()
+            topic_sent = True
         except Exception as e:
             logger.warning("Не удалось отправить жалобу в топик модерации (%s): %s", reports_thread_id, e)
+
+    # 4. Резервная доставка: если в ЛС никому не дошло (0) и в топик не отправлено
+    if pm_delivered_count == 0 and not topic_sent:
+        try:
+            fallback_text = (
+                f"{card}\n\n"
+                f"⚠️ <i>Внимание администрации: жалоба направлена сюда, так как в ЛС доставить не удалось "
+                f"(сотрудники не запустили бота в ЛС) и топик жалоб не настроен. Настройте: /settopic reports или /report_settings</i>"
+            )
+            sent_card = await message.bot.send_message(
+                chat_id=message.chat.id,
+                message_thread_id=current_thread_id,
+                text=fallback_text,
+                reply_markup=keyboard,
+            )
+            report.card_message_id = sent_card.message_id
+            await session.commit()
+        except Exception as e:
+            logger.error("Критическая ошибка доставки жалобы: %s", e)
 
 
 @router.callback_query(F.data.startswith("rep_claim:"))

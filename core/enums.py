@@ -3,7 +3,8 @@ from enum import IntEnum, Enum
 
 class PositionLevel(IntEnum):
     """
-    Иерархия должностей города (0-5) и государственные ранги (0-4).
+    Иерархия должностей города (0-6) и государственные ранги (0-5).
+    Ранг 5: Создатель / Владелец города (level 6)
     Ранг 4: Высшая администрация (level 5)
     Ранг 3: Администрация (level 4, 3)
     Ранг 2: Блюститель (level 2)
@@ -18,6 +19,7 @@ class PositionLevel(IntEnum):
     SENIOR_WARDEN = 3             # Ранг 3: Старший блюститель
     ADMINISTRATION = 4            # Ранг 3: Администрация (Зам. мэра, Министр, Судья)
     SENIOR_ADMINISTRATION = 5     # Ранг 4: Высшая администрация (Мэр, Премьер-министр, Конституционный судья)
+    OWNER = 6                     # Ранг 5: Создатель / Владелец города
 
     @classmethod
     def get_title(cls, level: int) -> str:
@@ -29,12 +31,13 @@ class PositionLevel(IntEnum):
             cls.SENIOR_WARDEN: "Старший блюститель",
             cls.ADMINISTRATION: "Администрация",
             cls.SENIOR_ADMINISTRATION: "Высшая администрация",
+            cls.OWNER: "Создатель / Владелец города",
         }
         return titles.get(level, f"Должность ({level})")
 
     @classmethod
     def get_rank(cls, level: int) -> int:
-        """Возвращает государственный ранг от 0 до 4 (или -1 для врага)."""
+        """Возвращает государственный ранг от 0 до 5 (или -1 для врага)."""
         if level < 0:
             return -1
         if level == 0:
@@ -45,7 +48,9 @@ class PositionLevel(IntEnum):
             return 2
         if level in (3, 4):
             return 3
-        return 4
+        if level == 5:
+            return 4
+        return 5
 
 
 class GovernmentRole(str, Enum):
