@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -10,12 +11,13 @@ from aiogram.types import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
-from core.enums import PositionLevel, TopicType
+from core.enums import PositionLevel, GovernmentRole, TopicType
 from core.report_service import ReportService
 from core.moderation_service import ModerationService
 from core.topic_service import TopicService
 from core.hierarchy_service import HierarchyService
 from core.exceptions import TownBaseException
+from bot.filters.topic import auto_delete_messages
 from config import settings
 
 logger = logging.getLogger("townbot.reports")
@@ -51,26 +53,22 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
     """
     Подача жалобы гражданином на сообщение нарушителя.
     Удаляет исходную команду, чтобы нарушитель не увидел факт доноса,
-    и пересылает карточку инцидента в REPORTS_TOPIC_ID.
+    и конфиденциально направляет карточку инцидента должностям от Блюстителя и выше
+    (Блюстители, Министры, Зам. мэра, Мэр, Судьи, Конст. судья, Премьер-министр).
     """
-    # 1. Сразу удаляем сообщение с командой заявителя
+    # 1. Сразу удаляем сообщение с командой заявителя (полная конфиденциальность)
     try:
         await message.delete()
     except Exception:
         pass
 
     if not message.reply_to_message:
-        # Уведомляем заявителя во временном сообщении
+        # Уведомляем заявителя во временном исчезающем сообщении
         hint = await message.answer(
             "⚠️ Чтобы подать жалобу, ответьте командой <code>/report [причина]</code> (или <code>!жб [причина]</code>) "
             "на сообщение нарушителя!"
         )
-        try:
-            import asyncio
-            from bot.filters.topic import auto_delete_messages
-            asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=6.0))
-        except Exception:
-            pass
+        asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=5.0))
         return
 
     violator_tg_user = message.reply_to_message.from_user
@@ -110,18 +108,14 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
             message_id=message.reply_to_message.message_id,
             message_text=reported_text,
             reason=reason,
+            chat_id=message.chat.id,
         )
     except TownBaseException as e:
         hint = await message.answer(e.message)
-        try:
-            import asyncio
-            from bot.filters.topic import auto_delete_messages
-            asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=6.0))
-        except Exception:
-            pass
+        asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [hint.message_id], delay=5.0))
         return
 
-    # Карточка жалобы для модераторов
+    # Карточка жалобы строго для должностных лиц (от Блюстителя и выше)
     card = (
         f"🚨 <b>ЖАЛОБА #{report.id}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -132,32 +126,61 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
         f"• <b>Причина:</b> <b>{reason}</b>\n"
         f"• <b>Текст сообщения:</b> <i>«{reported_text[:400]}»</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👮 <i>Ожидает рассмотрения дежурным Блюстителем или Министром.</i>"
+        f"👮 <i>Ожидает рассмотрения дежурным Блюстителем или Администрацией.</i>"
     )
 
-    # Определяем топик для репортов
+    # 1. В чате нарушителя и группы пишем только тихое исчезающее подтверждение заявителю
+    confidential_hint = await message.answer(
+        "🔒 <b>Жалоба принята конфиденциально!</b>\n"
+        "Информация передана дежурным Блюстителям и Администрации города."
+    )
+    asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [confidential_hint.message_id], delay=5.0))
+
+    # 2. Находим всех сотрудников от Ранга 2 (Блюститель) и выше (Блюстители, Министры, Зам. мэра, Мэр, Судьи, Конст. судья, Премьер-министр) + Овнера
+    staff_query = select(User).where(
+        (User.role_level >= PositionLevel.CHAT_WARDEN.value) |
+        (User.telegram_id == settings.OWNER_ID)
+    )
+    staff_members = (await session.scalars(staff_query)).all()
+
+    # 3. Отправляем интерактивную карточку в ЛИЧНЫЕ СООБЩЕНИЯ каждому сотруднику
+    keyboard = get_report_inline_keyboard(report.id)
+    for staff in staff_members:
+        try:
+            await message.bot.send_message(
+                chat_id=staff.telegram_id,
+                text=card,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.debug("Не удалось отправить карточку жалобы в ЛС сотруднику %s: %s", staff.telegram_id, e)
+
+    # 4. Если настроен отдельный закрытый топик модерации (не совпадающий с общим чатом и темой инцидента)
     reports_thread_id = await TopicService.get_topic_thread_id(
         session=session, chat_id=message.chat.id, topic_type=TopicType.REPORTS.value
     )
-
-    try:
-        sent_card = await message.bot.send_message(
-            chat_id=message.chat.id,
-            message_thread_id=reports_thread_id,
-            text=card,
-            reply_markup=get_report_inline_keyboard(report.id),
-        )
-        report.reports_message_id = sent_card.message_id
-        await session.commit()
-    except Exception as e:
-        logger.error(f"Не удалось отправить жалобу в топик модерации ({reports_thread_id}): {e}")
+    if reports_thread_id is not None and reports_thread_id != current_thread_id and reports_thread_id != settings.COMMUNITY_TOPIC_ID:
+        try:
+            sent_card = await message.bot.send_message(
+                chat_id=message.chat.id,
+                message_thread_id=reports_thread_id,
+                text=card,
+                reply_markup=keyboard,
+            )
+            report.card_message_id = sent_card.message_id
+            await session.commit()
+        except Exception as e:
+            logger.warning("Не удалось отправить жалобу в топик модерации (%s): %s", reports_thread_id, e)
 
 
 @router.callback_query(F.data.startswith("rep_claim:"))
 async def cb_report_claim(callback: CallbackQuery, session: AsyncSession, db_user: User):
-    """Закрепляет жалобу за дежурным сотрудником модерации."""
-    if not db_user or db_user.government_rank < 1:
-        await callback.answer("🚫 Рассматривать жалобы могут только сотрудники от Ранга 1 (Помощник)!", show_alert=True)
+    """Закрепляет жалобу за дежурным сотрудником модерации (от Блюстителя и выше)."""
+    if not db_user or db_user.government_rank < 2:
+        await callback.answer(
+            "🚫 Рассматривать жалобы могут только должности от Блюстителя и выше (Блюститель, Министр, Судья, Мэр)!",
+            show_alert=True,
+        )
         return
 
     report_id = int(callback.data.split(":")[1])
@@ -181,9 +204,12 @@ async def cb_report_claim(callback: CallbackQuery, session: AsyncSession, db_use
 
 @router.callback_query(F.data.startswith("rep_mute:"))
 async def cb_report_mute(callback: CallbackQuery, session: AsyncSession, db_user: User):
-    """Выдача мута нарушителю через карточку жалобы."""
-    if not db_user or db_user.government_rank < 1:
-        await callback.answer("🚫 Выдавать муты могут только сотрудники от Ранга 1 (Помощник)!", show_alert=True)
+    """Выдача мута нарушителю через карточку жалобы (доступно от Блюстителя)."""
+    if not db_user or db_user.government_rank < 2:
+        await callback.answer(
+            "🚫 Налагать наказания по жалобам могут только должности от Блюстителя и выше!",
+            show_alert=True,
+        )
         return
 
     parts = callback.data.split(":")
@@ -200,11 +226,13 @@ async def cb_report_mute(callback: CallbackQuery, session: AsyncSession, db_user
         await callback.answer("Нарушитель не найден!", show_alert=True)
         return
 
+    target_chat_id = report.chat_id or settings.MAIN_CHAT_ID or callback.message.chat.id
+
     try:
         p_log = await ModerationService.apply_mute(
             session=session,
             bot=callback.bot,
-            chat_id=callback.message.chat.id,
+            chat_id=target_chat_id,
             issuer=db_user,
             target=violator,
             duration_seconds=duration,
@@ -216,7 +244,7 @@ async def cb_report_mute(callback: CallbackQuery, session: AsyncSession, db_user
         await ModerationService.send_audit_log(
             bot=callback.bot,
             session=session,
-            chat_id=callback.message.chat.id,
+            chat_id=target_chat_id,
             target=violator,
             issuer=db_user,
             action_title=f"МУТ ({hours} {unit})",
@@ -246,9 +274,12 @@ async def cb_report_mute(callback: CallbackQuery, session: AsyncSession, db_user
 
 @router.callback_query(F.data.startswith("rep_warn:"))
 async def cb_report_warn(callback: CallbackQuery, session: AsyncSession, db_user: User):
-    """Выдача варна нарушителю через карточку жалобы."""
-    if not db_user or db_user.government_rank < 1:
-        await callback.answer("🚫 Выдавать варны могут только сотрудники от Ранга 1 (Помощник)!", show_alert=True)
+    """Выдача варна нарушителю через карточку жалобы (доступно от Блюстителя)."""
+    if not db_user or db_user.government_rank < 2:
+        await callback.answer(
+            "🚫 Выдавать варны по жалобам могут только должности от Блюстителя и выше!",
+            show_alert=True,
+        )
         return
 
     report_id = int(callback.data.split(":")[1])
@@ -262,11 +293,13 @@ async def cb_report_warn(callback: CallbackQuery, session: AsyncSession, db_user
         await callback.answer("Нарушитель не найден!", show_alert=True)
         return
 
+    target_chat_id = report.chat_id or settings.MAIN_CHAT_ID or callback.message.chat.id
+
     try:
         warns, auto_muted, auto_banned, extra, p_log = await ModerationService.apply_warn(
             session=session,
             bot=callback.bot,
-            chat_id=callback.message.chat.id,
+            chat_id=target_chat_id,
             issuer=db_user,
             target=violator,
             reason=f"По жалобе #{report.id}: {report.reason}",
@@ -275,7 +308,7 @@ async def cb_report_warn(callback: CallbackQuery, session: AsyncSession, db_user
         await ModerationService.send_audit_log(
             bot=callback.bot,
             session=session,
-            chat_id=callback.message.chat.id,
+            chat_id=target_chat_id,
             target=violator,
             issuer=db_user,
             action_title=f"ВАРН ({warns}/5)",
@@ -304,7 +337,11 @@ async def cb_report_warn(callback: CallbackQuery, session: AsyncSession, db_user
 
 @router.callback_query(F.data.startswith("rep_ban:"))
 async def cb_report_ban(callback: CallbackQuery, session: AsyncSession, db_user: User):
-    """Выдача бана (изгнания) через карточку жалобы (Ранг 3+)."""
+    """Выдача бана (изгнания) через карточку жалобы (Ранг 3+: Администрация, Судьи, Мэр)."""
+    if not db_user or db_user.government_rank < 2:
+        await callback.answer("🚫 Недостаточно полномочий!", show_alert=True)
+        return
+
     report_id = int(callback.data.split(":")[1])
     report = await ReportService.get_report(session, report_id)
     if not report:
@@ -324,11 +361,13 @@ async def cb_report_ban(callback: CallbackQuery, session: AsyncSession, db_user:
         )
         return
 
+    target_chat_id = report.chat_id or settings.MAIN_CHAT_ID or callback.message.chat.id
+
     try:
         p_log = await ModerationService.apply_ban(
             session=session,
             bot=callback.bot,
-            chat_id=callback.message.chat.id,
+            chat_id=target_chat_id,
             issuer=db_user,
             target=violator,
             reason=f"По жалобе #{report.id}: {report.reason}",
@@ -337,7 +376,7 @@ async def cb_report_ban(callback: CallbackQuery, session: AsyncSession, db_user:
         await ModerationService.send_audit_log(
             bot=callback.bot,
             session=session,
-            chat_id=callback.message.chat.id,
+            chat_id=target_chat_id,
             target=violator,
             issuer=db_user,
             action_title="БАН (ИЗГНАНИЕ)",
@@ -366,9 +405,12 @@ async def cb_report_ban(callback: CallbackQuery, session: AsyncSession, db_user:
 
 @router.callback_query(F.data.startswith("rep_false:"))
 async def cb_report_false(callback: CallbackQuery, session: AsyncSession, db_user: User):
-    """Отклонение жалобы как ложный вызов с начислением штрафных баллов заявителю."""
-    if not db_user or db_user.government_rank < 1:
-        await callback.answer("🚫 Недостаточно полномочий!", show_alert=True)
+    """Отклонение жалобы как ложный вызов (доступно от Блюстителя и выше)."""
+    if not db_user or db_user.government_rank < 2:
+        await callback.answer(
+            "🚫 Отклонять жалобы могут только должности от Блюстителя и выше!",
+            show_alert=True,
+        )
         return
 
     report_id = int(callback.data.split(":")[1])

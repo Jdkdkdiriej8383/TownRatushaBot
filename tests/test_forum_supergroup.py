@@ -379,3 +379,28 @@ async def test_duration_parsing_and_mute_limits(db_session: AsyncSession, gov_us
             target=citizen,
             reason="Самоуправный бан",
         )
+
+
+@pytest.mark.asyncio
+async def test_confidential_report_staff_visibility(db_session: AsyncSession, gov_users):
+    """Проверка, что в список получателей жалоб попадают ТОЛЬКО должности от Блюстителя и выше."""
+    from sqlalchemy import select
+    from config import settings
+
+    staff_query = select(User).where(
+        (User.role_level >= PositionLevel.CHAT_WARDEN.value) |
+        (User.telegram_id == settings.OWNER_ID)
+    )
+    recipients = (await db_session.scalars(staff_query)).all()
+    recipient_titles = {u.custom_title or u.position_title for u in recipients}
+
+    # Должны входить: Блюститель, Судья, Министр, Вице-мэр, Конституционный судья, Премьер, Мэр
+    assert "Блюститель" in recipient_titles
+    assert "Судья" in recipient_titles
+    assert "Министр" in recipient_titles
+    assert "Мэр" in recipient_titles
+
+    # НЕ должны входить: Гражданин, Помощник
+    assert "Гражданин" not in recipient_titles
+    assert "Помощник" not in recipient_titles
+

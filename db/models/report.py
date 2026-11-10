@@ -12,11 +12,14 @@ if TYPE_CHECKING:
 class Report(Base):
     """
     Таблица 'reports' — Жалобы граждан на нарушения в темах форума.
-    Маршрутизируются в тему REPORTS_TOPIC_ID с инлайн-кнопками модерации.
+    Маршрутизируются конфиденциально дежурным сотрудникам (Блюстителям и Администрации).
     """
     __tablename__ = "reports"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # Чат, где произошел инцидент
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     # Заявитель (подавший /report)
     reporter_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)

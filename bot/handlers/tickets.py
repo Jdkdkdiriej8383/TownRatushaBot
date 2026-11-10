@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 from aiogram import Router, F
@@ -17,8 +18,9 @@ from core.ticket_service import TicketService
 from core.topic_service import TopicService
 from core.hierarchy_service import HierarchyService
 from core.exceptions import TownBaseException
-from bot.filters.topic import TopicCommandFilter
+from bot.filters.topic import TopicCommandFilter, auto_delete_messages
 from bot.filters.role import RoleFilter, MinRankFilter
+from config import settings
 
 logger = logging.getLogger("townbot.tickets")
 router = Router(name="tickets_router")
@@ -157,13 +159,11 @@ async def cb_ticket_category_selected(callback: CallbackQuery, session: AsyncSes
         await TicketService.bind_forum_topic(session, ticket.id, thread_id)
     except Exception as e:
         logger.warning(f"Failed to create forum topic for ticket #{ticket.id}: {e}")
-        # Если группа не форум или нет прав, используем текущий тред или ветку
         thread_id = getattr(callback.message, "message_thread_id", None)
         if thread_id:
             await TicketService.bind_forum_topic(session, ticket.id, thread_id)
 
     # Определение дежурных сотрудников для уведомления
-    staff_pings = []
     if category == TicketCategory.COURT.value:
         q = select(User).where(User.custom_title.in_(["Судья", "Конституционный судья"]))
     elif category == TicketCategory.MAYOR.value:
@@ -176,6 +176,16 @@ async def cb_ticket_category_selected(callback: CallbackQuery, session: AsyncSes
     staff_members = (await session.scalars(q)).all()
     pings_list = [f"@{u.username}" for u in staff_members if u.username]
     staff_notice = " ".join(pings_list[:5]) if pings_list else "дежурные сотрудники ведомства"
+
+    # Формируем ссылку на топик
+    clean_chat_id = str(chat_id).replace("-100", "")
+    chat_username = callback.message.chat.username
+    if chat_username and thread_id:
+        topic_link = f"https://t.me/{chat_username}/{thread_id}"
+    elif thread_id:
+        topic_link = f"https://t.me/c/{clean_chat_id}/{thread_id}"
+    else:
+        topic_link = ""
 
     # 2. Отправляем карточку тикета в созданную тему
     card = (
@@ -205,6 +215,47 @@ async def cb_ticket_category_selected(callback: CallbackQuery, session: AsyncSes
         await callback.message.delete()
     except Exception:
         pass
+
+    # Отправляем подтверждение со ссылкой для быстрого перехода
+    if topic_link:
+        jump_kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="👉 Перейти в тему обращения", url=topic_link)]]
+        )
+        confirm_msg = await callback.message.answer(
+            f"✅ <b>Обращение #{ticket.id} создано!</b>\nПерейдите в созданную ветку форума:",
+            reply_markup=jump_kb,
+        )
+        asyncio.create_task(auto_delete_messages(callback.bot, chat_id, [confirm_msg.message_id], delay=20.0))
+
+        # Уведомляем заявителя в ЛС
+        try:
+            await callback.bot.send_message(
+                chat_id=db_user.telegram_id,
+                text=(
+                    f"🏛 <b>Ваше обращение #{ticket.id} успешно открыто!</b>\n"
+                    f"• <b>Инстанция:</b> {cat_title}\n"
+                    f"• <b>Ветка форума:</b> {topic_name}"
+                ),
+                reply_markup=jump_kb,
+            )
+        except Exception:
+            pass
+
+        # Уведомляем дежурный персонал в ЛС
+        for staff in staff_members:
+            try:
+                await callback.bot.send_message(
+                    chat_id=staff.telegram_id,
+                    text=(
+                        f"📬 <b>Новое обращение #{ticket.id}</b>\n"
+                        f"• <b>Заявитель:</b> @{db_user.username or '—'} ({db_user.full_name})\n"
+                        f"• <b>Инстанция:</b> {cat_title}\n"
+                        f"• <b>Ведомство:</b> <i>{ticket.target_role}</i>"
+                    ),
+                    reply_markup=jump_kb,
+                )
+            except Exception:
+                pass
 
 
 @router.callback_query(F.data.startswith("ticket_claim:"))
@@ -334,6 +385,7 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
         await message.reply(f"❌ {e.message}")
         return
 
+    cat_name = CATEGORY_NAMES.get(ticket.category, ticket.category)
     verdict_text = (
         f"🏛️ <b>ОФИЦИАЛЬНЫЙ ВЕРДИКТ ПО ОБРАЩЕНИЮ #{ticket.id}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -358,7 +410,7 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
             f"📁 <b>АРХИВ ОБРАЩЕНИЙ: ТИКЕТ #{ticket.id} ЗАКРЫТ</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"• <b>Заявитель:</b> ID <code>{ticket.creator_telegram_id}</code>\n"
-            f"• <b>Инстанция:</b> {ticket.category}\n"
+            f"• <b>Инстанция:</b> {cat_name}\n"
             f"• <b>Исполнитель:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
             f"• <b>Итоговый вердикт:</b> <i>{verdict}</i>\n"
             f"• <b>Заслуга сотрудника:</b> {db_user.closed_tickets_count} закрытых тикетов\n"
@@ -371,6 +423,25 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
         )
     except Exception as e:
         logger.warning(f"Не удалось отправить лог закрытия тикета: {e}")
+
+    # Уведомляем заявителя в ЛС о закрытии с вердиктом
+    try:
+        creator_user = await session.scalar(select(User).where(User.id == ticket.creator_id))
+        if creator_user:
+            await message.bot.send_message(
+                chat_id=creator_user.telegram_id,
+                text=(
+                    f"🏛 <b>ВАШЕ ОБРАЩЕНИЕ #{ticket.id} ЗАКРЫТО</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Инстанция:</b> {cat_name}\n"
+                    f"• <b>Сотрудник:</b> @{db_user.username or db_user.full_name} ({db_user.position_title})\n"
+                    f"• <b>Итоговое решение:</b> <i>{verdict}</i>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ Спасибо за обращение в Государственные органы!"
+                ),
+            )
+    except Exception as e:
+        logger.debug(f"Не удалось отправить вердикт заявителю в ЛС: {e}")
 
 
 @router.callback_query(F.data.startswith("ticket_close_btn:"))
@@ -392,6 +463,7 @@ async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db
         await callback.answer(e.message, show_alert=True)
         return
 
+    cat_name = CATEGORY_NAMES.get(ticket.category, ticket.category)
     verdict_text = (
         f"🏛️ <b>ОФИЦИАЛЬНЫЙ ВЕРДИКТ ПО ОБРАЩЕНИЮ #{ticket.id}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -418,7 +490,7 @@ async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db
             f"📁 <b>АРХИВ ОБРАЩЕНИЙ: ТИКЕТ #{ticket.id} ЗАКРЫТ</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"• <b>Заявитель:</b> ID <code>{ticket.creator_telegram_id}</code>\n"
-            f"• <b>Инстанция:</b> {ticket.category}\n"
+            f"• <b>Инстанция:</b> {cat_name}\n"
             f"• <b>Исполнитель:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
             f"• <b>Итоговый вердикт:</b> <i>Быстрое закрытие (вопрос решен)</i>\n"
             f"• <b>Заслуга сотрудника:</b> {db_user.closed_tickets_count} закрытых тикетов\n"
@@ -431,3 +503,54 @@ async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db
         )
     except Exception as e:
         logger.warning(f"Не удалось отправить лог закрытия тикета: {e}")
+
+    # Уведомляем заявителя в ЛС
+    try:
+        creator_user = await session.scalar(select(User).where(User.id == ticket.creator_id))
+        if creator_user:
+            await callback.bot.send_message(
+                chat_id=creator_user.telegram_id,
+                text=(
+                    f"🏛 <b>ВАШЕ ОБРАЩЕНИЕ #{ticket.id} ЗАКРЫТО</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Инстанция:</b> {cat_name}\n"
+                    f"• <b>Сотрудник:</b> @{db_user.username or db_user.full_name} ({db_user.position_title})\n"
+                    f"• <b>Итоговое решение:</b> <i>Вопрос урегулирован</i>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ Спасибо за обращение в Государственные органы!"
+                ),
+            )
+    except Exception as e:
+        logger.debug(f"Не удалось отправить вердикт заявителю в ЛС: {e}")
+
+
+@router.message(F.message_thread_id.is_not(None))
+async def guard_ticket_topic_messages(message: Message, session: AsyncSession, db_user: User):
+    """
+    Контроль доступа внутри форумных веток тикетов:
+    В ветке тикета разрешено писать ТОЛЬКО заявителю и дежурным сотрудникам.
+    Сообщения посторонних участников мгновенно удаляются.
+    """
+    # Пропускаем команды, чтобы они шли в соответствующие обработчики
+    if (message.text or "").startswith("/"):
+        return
+
+    thread_id = message.message_thread_id
+    ticket = await TicketService.get_ticket_by_thread(session, thread_id)
+    if not ticket or ticket.status == TicketStatus.CLOSED.value:
+        return
+
+    # Разрешено: создателю тикета, сотрудникам от Ранга 1, и Овнеру
+    is_creator = message.from_user and message.from_user.id == ticket.creator_telegram_id
+    is_staff = db_user.is_staff or db_user.government_rank >= 1 or db_user.telegram_id == settings.OWNER_ID
+
+    if not (is_creator or is_staff):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        warn = await message.answer(
+            f"⚠️ @{message.from_user.username or message.from_user.first_name}, "
+            f"эта ветка является персональным обращением гражданина и доступна только заявителю и администрации!"
+        )
+        asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [warn.message_id], delay=5.0))

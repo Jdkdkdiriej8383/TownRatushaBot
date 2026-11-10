@@ -32,6 +32,7 @@ class ReportService:
         message_id: Optional[int],
         message_text: Optional[str],
         reason: str,
+        chat_id: Optional[int] = None,
     ) -> Report:
         """Создает новую запись жалобы в базе данных."""
         if cls.is_reporter_blocked(reporter):
@@ -46,6 +47,7 @@ class ReportService:
             raise TownBaseException("🤷 Нельзя подать жалобу на самого себя!")
 
         report = Report(
+            chat_id=chat_id,
             reporter_id=reporter.id,
             reporter_telegram_id=reporter.telegram_id,
             violator_id=violator.id,
