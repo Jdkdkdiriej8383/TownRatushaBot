@@ -96,9 +96,6 @@ class User(Base):
 
     @property
     def position_title(self) -> str:
-        from config import settings
-        if self.telegram_id == settings.OWNER_ID or (self.username and self.username.lower() == settings.OWNER_USERNAME.lower()) or self.role_level >= PositionLevel.OWNER.value:
-            return self.custom_title or "👑 Создатель / Владелец города"
         if self.is_enemy:
             return "Враг города"
         return self.custom_title or PositionLevel.get_title(self.role_level)

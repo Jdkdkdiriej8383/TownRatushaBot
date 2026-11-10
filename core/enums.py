@@ -31,7 +31,7 @@ class PositionLevel(IntEnum):
             cls.SENIOR_WARDEN: "Старший блюститель",
             cls.ADMINISTRATION: "Администрация",
             cls.SENIOR_ADMINISTRATION: "Высшая администрация",
-            cls.OWNER: "Создатель / Владелец города",
+            cls.OWNER: "Высшая администрация",
         }
         return titles.get(level, f"Должность ({level})")
 

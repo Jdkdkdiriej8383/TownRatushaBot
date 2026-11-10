@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
 from db.models.ticket import Ticket
 from db.models.punishment import Punishment
-from core.enums import TicketCategory, TicketStatus, PositionLevel, PunishmentType
+from core.enums import TicketCategory, TicketStatus, PositionLevel, PunishmentType, TopicType
 from core.ticket_service import TicketService
 from core.moderation_service import ModerationService
 from core.topic_service import TopicService
@@ -21,6 +21,7 @@ from core.hierarchy_service import HierarchyService
 from core.exceptions import TownBaseException
 from bot.filters.topic import TopicCommandFilter
 from bot.filters.role import MinRankFilter
+from config import settings
 
 logger = logging.getLogger("townbot.court")
 router = Router(name="court_router")
@@ -52,16 +53,18 @@ def get_appeal_inline_keyboard(appeal_id: int) -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("appeal", "апелляция", "иск"), TopicCommandFilter(["court", "admin"]))
+@router.message(Command("appeal", "апелляция", "иск"))
 async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
     """
-    Подача апелляции или судебного иска гражданином в Зале Суда (/appeal [текст]).
+    Подача апелляции или судебного иска гражданином (/appeal [текст] или /апелляция [текст]).
+    Доступно как в темах форума, так и в личных сообщениях с ботом (для изгнанных).
     """
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await message.reply(
-            "⚖️ <b>Подача апелляции в Суд:</b>\n"
-            "Использование: <code>/appeal [опишите причину несогласия с наказанием или суть иска]</code>"
+            "⚖️ <b>Подача судебной апелляции в Зал Суда:</b>\n"
+            "Использование: <code>/appeal [опишите причину несогласия с наказанием или суть иска]</code>\n\n"
+            "<i>Пример: <code>/appeal Был ошибочно замучен, прошу пересмотреть дело.</code></i>"
         )
         return
 
@@ -90,7 +93,60 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
         f"🏛️ <i>Дело открыто. Ожидает рассмотрения Судьей или Конституционным судьей.</i>"
     )
 
-    await message.answer(card, reply_markup=get_appeal_inline_keyboard(ticket.id))
+    keyboard = get_appeal_inline_keyboard(ticket.id)
+
+    # 1. Отвечаем заявителю подтверждением о принятии иска
+    applicant_reply = (
+        f"⚖️ <b>СУДЕБНАЯ АПЕЛЛЯЦИЯ #{ticket.id} ЗАРЕГИСТРИРОВАНА!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Суть иска:</b> <i>«{appeal_text[:300]}»</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏛️ <i>Дело передано на рассмотрение Судейской коллегии города. "
+        f"О вынесенном вердикте вы будете уведомлены персонально.</i>"
+    )
+    await message.answer(applicant_reply)
+
+    # 2. Определяем чат и топик суда
+    target_chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
+    court_thread_id = None
+    if target_chat_id:
+        court_thread_id = await TopicService.get_topic_thread_id(
+            session=session, chat_id=target_chat_id, topic_type=TopicType.COURT.value
+        )
+        if court_thread_id is None:
+            court_thread_id = await TopicService.get_topic_thread_id(
+                session=session, chat_id=target_chat_id, topic_type=TopicType.ADMIN.value
+            )
+
+    # 3. Публикуем интерактивную карточку в топик Зала Суда / чат
+    if target_chat_id:
+        current_thread_id = getattr(message, "message_thread_id", None)
+        send_thread = court_thread_id if court_thread_id is not None else current_thread_id
+        try:
+            await message.bot.send_message(
+                chat_id=target_chat_id,
+                message_thread_id=send_thread,
+                text=card,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.warning("Не удалось отправить карточку апелляции в топик суда %s: %s", send_thread, e)
+
+    # 4. Направляем карточку в ЛС судьям (Ранг 3+) и Овнеру
+    judges_query = select(User).where(
+        (User.role_level >= PositionLevel.ADMINISTRATION.value) |
+        (User.telegram_id == settings.OWNER_ID)
+    )
+    judges = (await session.scalars(judges_query)).all()
+    for judge in judges:
+        try:
+            await message.bot.send_message(
+                chat_id=judge.telegram_id,
+                text=card,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.debug("Не удалось отправить карточку апелляции в ЛС судье %s: %s", judge.telegram_id, e)
 
 
 @router.message(Command("verdict", "вердикт"), TopicCommandFilter(["court", "admin"]))
@@ -261,6 +317,20 @@ async def cb_court_verdict(callback: CallbackQuery, session: AsyncSession, db_us
         staff_user=db_user,
         verdict=outcome_text,
     )
+
+    # Уведомляем заявителя в ЛС
+    try:
+        verdict_pm = (
+            f"⚖️ <b>ВЫНЕСЕН СУДЕБНЫЙ ВЕРДИКТ ПО ДЕЛУ #{ticket.id}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Решение:</b> {outcome_text}\n"
+            f"• <b>Судья:</b> {db_user.position_title} @{db_user.username or db_user.full_name}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Решение суда вступает в силу немедленно.</i>"
+        )
+        await callback.bot.send_message(chat_id=target_user.telegram_id, text=verdict_pm)
+    except Exception as e:
+        logger.warning("Не удалось уведомить заявителя в ЛС: %s", e)
 
     await callback.answer("Вердикт успешно вынесен!")
     if callback.message:

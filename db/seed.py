@@ -723,13 +723,14 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                         username=settings.OWNER_USERNAME,
                         full_name="Овнер Ратуши",
                         role_level=PositionLevel.OWNER.value,
-                        custom_title="👑 Создатель / Владелец города",
+                        custom_title="Мэр",
                         is_enemy=False,
                     )
                 )
             else:
                 owner_user.role_level = PositionLevel.OWNER.value
-                owner_user.custom_title = "👑 Создатель / Владелец города"
+                if owner_user.custom_title == "👑 Создатель / Владелец города":
+                    owner_user.custom_title = "Мэр"
                 owner_user.is_enemy = False
                 if not owner_user.username:
                     owner_user.username = settings.OWNER_USERNAME

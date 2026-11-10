@@ -23,59 +23,96 @@ router = Router(name="justice_router")
 @router.message(Command("наказать", "punish"))
 async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
     """
-    Команда /наказать @юзер [номер_статьи] [опциональный_срок_в_сек/причина]
-    (или в ответ на сообщение нарушителя: /наказать [номер_статьи])
-    Налагает санкцию строго по Городскому Своду Законов с проверкой регуляторов.
+    Команда /наказать @юзер [номер_статьи/срок] [причина]
+    (или в ответ на сообщение нарушителя: /наказать [номер_статьи/срок] [причина])
+    Поддерживает:
+    - Статьи закона: /наказать 2.1, /наказать @user 1.4
+    - Временные муты: /наказать 1h спам, /наказать @user 30m флуд
+    - Причины: /наказать @user спам в чате
     """
-    raw_args = message.text.split()[1:]
+    from core.moderation_service import parse_duration
+
+    raw_args = (message.text or "").split()[1:]
     target_user, remaining_args = await extract_target_user(message, session, raw_args)
 
     if not target_user:
         await message.answer(
-            "Использование: <code>/наказать @юзер [номер_статьи]</code> "
-            "или ответом на сообщение нарушителя: <code>/наказать [номер_статьи]</code>"
+            "⚠️ <b>Использование команды /наказать:</b>\n"
+            "• <b>Ответом:</b> ответьте на сообщение нарушителя: <code>/наказать [статья|срок] [причина]</code>\n"
+            "• <b>По тегу:</b> <code>/наказать @username [статья|срок] [причина]</code>\n\n"
+            "<b>Примеры:</b>\n"
+            "• <code>/наказать 2.1</code> — по статье 2.1 Свода Законов\n"
+            "• <code>/наказать 1h спам</code> — ограничение речи на 1 час\n"
+            "• <code>/наказать @user 24ч оскорбления</code>\n"
+            "• <code>/наказать 1.4</code> — изгнание (бан) по ст. 1.4"
         )
         return
 
-    if not remaining_args:
-        await message.answer("⚠️ Укажите номер статьи Закона! Пример: <code>/наказать @юзер 2.1</code>")
-        return
+    # Разбираем статью / срок / причину
+    law = None
+    mute_sec = 3600
+    is_ban = False
+    custom_reason = None
+    sanction_descr = ""
+    law_article_str = "2.1"
+    law_title_str = "Нарушение регламента чата"
 
-    article_number = remaining_args[0].strip()
-    custom_reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else None
+    if not remaining_args:
+        # Без аргументов ответом: применяем дефолтную ст. 2.1 (1 час мута)
+        try:
+            law = await LawService.get_law(session, "2.1")
+            mute_sec = law.default_mute_seconds or 3600
+            law_article_str = law.article_number
+            law_title_str = law.title
+            custom_reason = f"Нарушение ст. {law.article_number}: {law.title}"
+        except Exception:
+            custom_reason = "Нарушение порядка чата"
+    else:
+        first_token = remaining_args[0].strip().lstrip("№")
+        # 1. Проверяем, является ли первый токен статьей закона
+        try:
+            law = await LawService.get_law(session, first_token)
+            law_article_str = law.article_number
+            law_title_str = law.title
+            custom_reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else f"Нарушение ст. {law.article_number}: {law.title}"
+            if law.is_ban_applicable and (law.default_mute_seconds is None or law.default_mute_seconds == 0):
+                is_ban = True
+            else:
+                mute_sec = law.default_mute_seconds or 3600
+        except Exception:
+            # 2. Не статья — проверяем, является ли сроком (1h, 30m, 1d, 2ч и т.д.)
+            parsed_sec = parse_duration(first_token)
+            if parsed_sec > 0:
+                mute_sec = parsed_sec
+                custom_reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else "Нарушение регламента чата"
+            else:
+                # Вся строка — причина, мут 1 час
+                custom_reason = " ".join(remaining_args).strip()
+                mute_sec = 3600
 
     try:
-        # 1. Получаем статью закона
-        law = await LawService.get_law(session, article_number)
-
-        # 2. Определяем тип санкции по статье
-        if law.is_ban_applicable and (law.default_mute_seconds is None or law.default_mute_seconds == 0):
-            # Санкция — изгнание (бан)
+        if is_ban:
             regulator = await RegulatorService.validate_ban(
                 session=session,
                 issuer=db_user,
                 target=target_user,
-                duration_seconds=regulator_max_ban if (regulator_max_ban := 0) else 0
+                duration_seconds=0
             )
 
-            # Баним в Telegram
             try:
                 await message.chat.ban(user_id=target_user.telegram_id)
-            except Exception:
-                pass  # В ЛС или нет прав в чате
+            except Exception as e:
+                logger.warning("Не удалось забанить в Telegram: %s", e)
 
-            # Если статья 1.4 — статус Врага города
-            if law.article_number == "1.4":
+            if law and law.article_number == "1.4":
                 target_user.is_enemy = True
-                target_user.enemy_reason = custom_reason or law.title
+                target_user.enemy_reason = custom_reason
 
             punishment_type = PunishmentType.BAN
             duration_sec = regulator.max_ban_time
             sanction_descr = "Изгнание из города (Бан)"
 
         else:
-            # Санкция — мут (ограничение речи)
-            mute_sec = law.default_mute_seconds or 3600
             regulator = await RegulatorService.validate_mute(
                 session=session,
                 issuer=db_user,
@@ -83,29 +120,32 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
                 duration_seconds=mute_sec
             )
 
-            # Применяем restrict в чате
             until = int(time.time() + mute_sec)
+            restrict_ok = True
             try:
                 await message.chat.restrict(
                     user_id=target_user.telegram_id,
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=until
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                restrict_ok = False
+                logger.warning("Не удалось выдать restrict в Telegram: %s", e)
 
             punishment_type = PunishmentType.MUTE
             duration_sec = mute_sec
             sanction_descr = f"Ограничение речи на {format_duration(mute_sec)}"
+            if not restrict_ok:
+                sanction_descr += " <i>(требуются права администратора боту в чате)</i>"
 
-        # 3. Фиксируем в протокол городского суда
-        reason = custom_reason or f"Нарушение ст. {law.article_number}: {law.title}"
+        # Фиксируем в протокол городского суда
+        reason = custom_reason or f"Нарушение порядка"
         await LawService.log_punishment(
             session=session,
             target_user=target_user,
             issuer_user=db_user,
             punishment_type=punishment_type,
-            law_article=law.article_number,
+            law_article=law_article_str,
             duration_seconds=duration_sec,
             reason=reason,
         )
@@ -113,21 +153,20 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
         target_user.warns_count += 1
         await session.commit()
 
-        # 4. Формируем вердикт
+        # Формируем вердикт
         verdict = (
             f"⚖️ <b>СУДЕБНЫЙ ПРИГОВОР ВСТУПИЛ В СИЛУ</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>Нарушитель:</b> {target_user.full_name} ({target_user.position_title})\n"
             f"👮 <b>Блюститель:</b> {db_user.full_name} ({db_user.position_title})\n"
-            f"📜 <b>Статья закона:</b> № {law.article_number} — {law.title}\n"
+            f"📜 <b>Основание:</b> ст. {law_article_str} — {law_title_str}\n"
             f"⚡ <b>Мера пресечения:</b> {sanction_descr}\n"
-            f"📝 <b>Основание:</b> {reason}\n"
+            f"📝 <b>Причина:</b> {reason}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<i>Запись внесена в протокол городского суда.</i>"
         )
         await message.answer(verdict)
 
-        # Отправка в лог-канал
         if settings.LOG_CHAT_ID and message.bot:
             try:
                 await message.bot.send_message(chat_id=settings.LOG_CHAT_ID, text=verdict)

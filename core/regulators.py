@@ -41,19 +41,22 @@ class RegulatorService:
 
     @staticmethod
     async def get_regulator(session: AsyncSession, role_level: int) -> Regulator:
-        query = select(Regulator).where(Regulator.role_level == role_level)
+        effective_level = min(role_level, PositionLevel.SENIOR_ADMINISTRATION.value)
+        if effective_level < 0:
+            effective_level = -1
+        query = select(Regulator).where(Regulator.role_level == effective_level)
         reg = await session.scalar(query)
         if not reg:
             # Fallback на дефолтные безопасные ограничения
             return Regulator(
                 role_level=role_level,
                 title=PositionLevel.get_title(role_level),
-                max_mute_time=0,
-                max_fine_amount=0,
-                can_ban=False,
-                can_edit_laws=False,
-                can_appoint_level=-1,
-                can_create_referendum=False,
+                max_mute_time=31536000 if role_level >= 5 else 0,
+                max_fine_amount=1000000 if role_level >= 5 else 0,
+                can_ban=(role_level >= 4),
+                can_edit_laws=(role_level >= 5),
+                can_appoint_level=5 if role_level >= 5 else -1,
+                can_create_referendum=(role_level >= 4),
             )
         return reg
 
@@ -66,6 +69,10 @@ class RegulatorService:
         """
         if issuer.telegram_id == target.telegram_id:
             raise SelfPunishmentError()
+
+        from core.hierarchy_service import HierarchyService
+        if HierarchyService.is_owner(issuer):
+            return
 
         # Овнер города обладает абсолютной неприкосновенностью
         if target.telegram_id == settings.OWNER_ID or (target.username and target.username.lower() == settings.OWNER_USERNAME.lower()):

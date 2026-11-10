@@ -111,40 +111,47 @@ def get_report_inline_keyboard(report_id: int) -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("report_settings", "настройки_жалоб", "reports_settings"))
+@router.message(Command("report_settings", "reportsettings", "reports_settings", "настройки_репортов", "настройка_репортов", "настройки_жалоб", "настройка_жалоб", "настройки"))
+@router.message(F.text.lower().in_(["/report_settings", "/настройки_репортов", "/настройки_жалоб", "настройки репортов", "настройки жалоб", "!настройки"]))
 async def cmd_report_settings(message: Message, session: AsyncSession, db_user: User):
     """
     Панель управления системой жалоб:
     - Выбор маршрутизации (ЛС / Топик / Оба)
     - Переключение анонимности заявителя
     - Привязка текущего топика
-    Доступно Администрации (Ранг 3+) и Овнеру города.
+    Доступно Администрации (Ранг 3+), Овнеру города и Администраторам чата в Telegram.
     """
-    if not (
+    target_chat_id = message.chat.id
+    if message.chat.type == "private":
+        target_chat_id = settings.MAIN_CHAT_ID or message.chat.id
+
+    is_admin = False
+    if (
         db_user.government_rank >= 3
         or db_user.telegram_id == settings.OWNER_ID
         or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
     ):
-        is_tg_admin = False
-        if message.chat.type in ("group", "supergroup") and message.from_user:
-            try:
-                member = await message.chat.get_member(message.from_user.id)
-                if getattr(member, "status", "") in ("creator", "administrator"):
-                    is_tg_admin = True
-            except Exception:
-                pass
-        if not is_tg_admin:
-            await message.answer("🚫 Доступ к настройкам жалоб открыт только для Администрации (Ранг 3+) и Овнера!")
-            return
+        is_admin = True
+    elif message.chat.type in ("group", "supergroup") and message.from_user:
+        try:
+            member = await message.chat.get_member(message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
 
-    chat_settings = await _get_or_create_chat_settings(session, message.chat.id)
+    if not is_admin:
+        await message.answer("🚫 Доступ к настройкам жалоб открыт только для Администрации (Ранг 3+) и Овнера!")
+        return
+
+    chat_settings = await _get_or_create_chat_settings(session, target_chat_id)
 
     topic_id = chat_settings.reports_topic_id
     if topic_id is None:
         topic_id = await TopicService.get_topic_thread_id(
-            session=session, chat_id=message.chat.id, topic_type=TopicType.REPORTS.value
+            session=session, chat_id=target_chat_id, topic_type=TopicType.REPORTS.value
         )
-    topic_name = await TopicService.get_topic_name(session, message.chat.id, topic_id) if topic_id else "Не привязан (fallback)"
+    topic_name = await TopicService.get_topic_name(session, target_chat_id, topic_id) if topic_id else "Не привязан (fallback)"
 
     text = render_report_settings_text(chat_settings, topic_name)
     kb = get_report_settings_keyboard(chat_settings)
@@ -153,11 +160,22 @@ async def cmd_report_settings(message: Message, session: AsyncSession, db_user: 
 
 @router.callback_query(F.data.startswith("rep_set:"))
 async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_user: User):
-    if not (
+    is_admin = False
+    if (
         db_user.government_rank >= 3
         or db_user.telegram_id == settings.OWNER_ID
         or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
     ):
+        is_admin = True
+    elif callback.message and callback.message.chat.type in ("group", "supergroup"):
+        try:
+            member = await callback.message.chat.get_member(callback.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
         await callback.answer("🚫 У вас нет прав для изменения настроек жалоб!", show_alert=True)
         return
 
@@ -190,7 +208,9 @@ async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_
             await session.commit()
             await callback.answer("✅ Текущая ветка форума назначена топиком жалоб!", show_alert=True)
         else:
-            await callback.answer("⚠️ Выполните привязку внутри конкретной темы форума!", show_alert=True)
+            chat_settings.reports_topic_id = None
+            await session.commit()
+            await callback.answer("⚠️ Вы в общем чате. Перейдите в нужную тему форума для привязки.", show_alert=True)
 
     elif action == "close":
         try:
@@ -398,25 +418,43 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
     keyboard = get_report_inline_keyboard(report.id)
     pm_delivered_count = 0
 
-    # 2. Отправка в ЛИЧНЫЕ СООБЩЕНИЯ сотрудникам модерации
+    # 2. Отправка в ЛИЧНЫЕ СООБЩЕНИЯ (Владелец, сотрудники БД, администраторы чата Telegram)
     if send_to_pm:
-        staff_query = select(User).where(
-            (User.role_level >= PositionLevel.CHAT_WARDEN.value) |
+        staff_ids = set()
+        # Владелец всегда
+        if settings.OWNER_ID:
+            staff_ids.add(settings.OWNER_ID)
+
+        # Все сотрудники из базы данных (от Помощника и выше)
+        staff_query = select(User.telegram_id).where(
+            (User.role_level >= PositionLevel.ASSISTANT.value) |
             (User.telegram_id == settings.OWNER_ID)
         )
-        staff_members = (await session.scalars(staff_query)).all()
-        for staff in staff_members:
+        db_staff_ids = (await session.scalars(staff_query)).all()
+        staff_ids.update(db_staff_ids)
+
+        # Администраторы текущего чата в Telegram
+        if message.chat.type in ("group", "supergroup"):
+            try:
+                chat_admins = await message.chat.get_administrators()
+                for a in chat_admins:
+                    if not a.user.is_bot:
+                        staff_ids.add(a.user.id)
+            except Exception as e:
+                logger.debug("Не удалось получить список администраторов Telegram: %s", e)
+
+        for target_id in staff_ids:
             try:
                 await message.bot.send_message(
-                    chat_id=staff.telegram_id,
+                    chat_id=target_id,
                     text=card,
                     reply_markup=keyboard,
                 )
                 pm_delivered_count += 1
             except Exception as e:
-                logger.warning("Не удалось отправить карточку жалобы в ЛС сотруднику %s: %s", staff.telegram_id, e)
+                logger.warning("Не удалось отправить карточку жалобы в ЛС сотруднику/админу %s: %s", target_id, e)
 
-    # 3. Отправка в ТОПИК ЖАЛОБ
+    # 3. Отправка в ТОПИК ФОРУМА
     reports_thread_id = None
     if chat_settings.reports_topic_id:
         reports_thread_id = chat_settings.reports_topic_id
@@ -429,39 +467,28 @@ async def cmd_report(message: Message, session: AsyncSession, db_user: User):
                 session=session, chat_id=message.chat.id, topic_type=TopicType.ADMIN.value
             )
 
-    topic_sent = False
-    if (send_to_topic or pm_delivered_count == 0) and reports_thread_id is not None:
-        try:
-            sent_card = await message.bot.send_message(
-                chat_id=message.chat.id,
-                message_thread_id=reports_thread_id,
-                text=card,
-                reply_markup=keyboard,
-            )
-            report.card_message_id = sent_card.message_id
-            await session.commit()
-            topic_sent = True
-        except Exception as e:
-            logger.warning("Не удалось отправить жалобу в топик модерации (%s): %s", reports_thread_id, e)
+    # Если топик жалоб не привязан, используем текущую ветку форума / чат
+    target_send_thread = reports_thread_id if reports_thread_id is not None else current_thread_id
 
-    # 4. Резервная доставка: если в ЛС никому не дошло (0) и в топик не отправлено
-    if pm_delivered_count == 0 and not topic_sent:
-        try:
-            fallback_text = (
-                f"{card}\n\n"
-                f"⚠️ <i>Внимание администрации: жалоба направлена сюда, так как в ЛС доставить не удалось "
-                f"(сотрудники не запустили бота в ЛС) и топик жалоб не настроен. Настройте: /settopic reports или /report_settings</i>"
+    # В группу/топик отправляем, если включен режим 'both' или 'topic', либо если в ЛС не удалось доставить
+    if send_to_topic or pm_delivered_count == 0 or reports_thread_id is not None:
+        topic_card = card
+        if pm_delivered_count == 0:
+            topic_card += (
+                "\n\n💡 <i>Дежурным сотрудникам: чтобы получать жалобы персонально в ЛС, "
+                "начните диалог с ботом (/start в ЛС)!</i>"
             )
+        try:
             sent_card = await message.bot.send_message(
                 chat_id=message.chat.id,
-                message_thread_id=current_thread_id,
-                text=fallback_text,
+                message_thread_id=target_send_thread,
+                text=topic_card,
                 reply_markup=keyboard,
             )
             report.card_message_id = sent_card.message_id
             await session.commit()
         except Exception as e:
-            logger.error("Критическая ошибка доставки жалобы: %s", e)
+            logger.warning("Не удалось отправить жалобу в топик форума (%s): %s", target_send_thread, e)
 
 
 @router.callback_query(F.data.startswith("rep_claim:"))

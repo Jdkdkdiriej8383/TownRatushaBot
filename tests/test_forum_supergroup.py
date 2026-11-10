@@ -421,7 +421,7 @@ async def test_owner_rank_5_and_seniority(db_session: AsyncSession, gov_users):
     await db_session.commit()
 
     assert owner.government_rank == 5
-    assert owner.position_title == "👑 Создатель / Владелец города"
+    assert owner.position_title == "Высшая администрация"
     assert HierarchyService.is_owner(owner) is True
 
     # Старшинство над Мэром
@@ -549,5 +549,72 @@ async def test_report_delivery_fallback_when_pm_fails(db_session: AsyncSession, 
     assert mock_bot.send_message.call_count >= 2
     last_call = mock_bot.send_message.call_args_list[-1]
     assert "ЖАЛОБА #" in last_call.kwargs.get("text", "")
+
+
+@pytest.mark.asyncio
+async def test_cmd_punish_flexible(db_session: AsyncSession, gov_users):
+    """Проверка работы обновленной команды /наказать с кастомным сроком и статьей."""
+    from bot.handlers.justice import cmd_punish
+
+    mayor = gov_users["mayor"]
+    citizen = gov_users["citizen"]
+
+    mock_msg = MagicMock()
+    mock_msg.chat.id = -100555
+    mock_msg.text = "/наказать @citizen_vasya 1h Нарушение порядка"
+    mock_msg.reply_to_message = None
+    mock_msg.message_thread_id = None
+    mock_msg.chat.restrict = AsyncMock()
+    mock_msg.answer = AsyncMock()
+    mock_msg.bot = MagicMock()
+    mock_msg.bot.send_message = AsyncMock()
+
+    await cmd_punish(message=mock_msg, session=db_session, db_user=mayor)
+    mock_msg.answer.assert_called_once()
+    assert "СУДЕБНЫЙ ПРИГОВОР ВСТУПИЛ В СИЛУ" in mock_msg.answer.call_args[0][0]
+    assert citizen.warns_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_cmd_appeal_and_verdict(db_session: AsyncSession, gov_users):
+    """Проверка подачи судебной апелляции и вынесения вердикта."""
+    from bot.handlers.court import cmd_appeal, cb_court_verdict
+
+    citizen = gov_users["citizen"]
+    judge = gov_users["judge"]
+
+    # 1. Гражданин подает /appeal
+    mock_msg = MagicMock()
+    mock_msg.chat.id = -100444
+    mock_msg.chat.type = "supergroup"
+    mock_msg.text = "/appeal Был наказан по ошибке, прошу разобраться"
+    mock_msg.message_thread_id = 15
+    mock_msg.answer = AsyncMock()
+    mock_msg.bot = MagicMock()
+    mock_msg.bot.send_message = AsyncMock()
+
+    await cmd_appeal(message=mock_msg, session=db_session, db_user=citizen)
+    mock_msg.answer.assert_called_once()
+    assert "СУДЕБНАЯ АПЕЛЛЯЦИЯ" in mock_msg.answer.call_args[0][0]
+
+    # Находим созданный тикет
+    t_query = select(Ticket).where(Ticket.creator_id == citizen.id)
+    ticket = await db_session.scalar(t_query)
+    assert ticket is not None
+
+    # 2. Судья оправдывает по кнопке
+    mock_cb = MagicMock()
+    mock_cb.data = f"court_verdict:{ticket.id}:pardon"
+    mock_cb.message.chat.id = -100444
+    mock_cb.message.html_text = "Карточка апелляции"
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+    mock_cb.bot = MagicMock()
+    mock_cb.bot.send_message = AsyncMock()
+
+    await cb_court_verdict(callback=mock_cb, session=db_session, db_user=judge)
+    await db_session.refresh(ticket)
+    assert ticket.status == TicketStatus.CLOSED.value
+    assert "Оправдан" in ticket.verdict
 
 

@@ -168,11 +168,13 @@ async def cmd_staff(message: Message, session: AsyncSession, db_user: User):
         await message.answer("ℹ️ Действующий состав администрации пока не назначен.")
         return
 
-    ranks_map: dict[int, list[User]] = {5: [], 4: [], 3: [], 2: [], 1: []}
+    ranks_map: dict[int, list[User]] = {4: [], 3: [], 2: [], 1: []}
     for m in staff_members:
         rank = m.government_rank
-        if rank in ranks_map:
-            ranks_map[rank].append(m)
+        # Объединяем высшую администрацию (ранги 4 и 5) вместе без публичного выделения овнера
+        effective_rank = 4 if rank >= 4 else rank
+        if effective_rank in ranks_map:
+            ranks_map[effective_rank].append(m)
 
     lines = [
         "🏛️ <b>ГОСУДАРСТВЕННЫЙ АППАРАТ</b>",
@@ -180,14 +182,13 @@ async def cmd_staff(message: Message, session: AsyncSession, db_user: User):
     ]
 
     rank_headers = {
-        5: "👑 <b>Ранг 5: Создатель и Владелец города (Founder)</b>",
-        4: "🏛 <b>Ранг 4: Высшая администрация (Supreme Admins)</b>",
+        4: "👑 <b>Ранг 4: Высшая администрация (Supreme Admins)</b>",
         3: "⚖️ <b>Ранг 3: Администрация (Middle Admins)</b>",
         2: "🛡️ <b>Ранг 2: Блюстители (Senior Moderators)</b>",
         1: "🔰 <b>Ранг 1: Помощники (Junior Moderators)</b>",
     }
 
-    for rank in [5, 4, 3, 2, 1]:
+    for rank in [4, 3, 2, 1]:
         members = ranks_map[rank]
         if not members:
             continue
