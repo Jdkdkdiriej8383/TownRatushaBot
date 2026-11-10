@@ -59,6 +59,7 @@ async def main():
     # 3. Регистрация Middlewares
     dp.update.middleware(DatabaseSessionMiddleware(session_maker))
     dp.message.middleware(UserSyncMiddleware())
+    dp.callback_query.middleware(UserSyncMiddleware())
     dp.message.middleware(ChatRegulatorMiddleware())
 
     # 4. Регистрация Handlers

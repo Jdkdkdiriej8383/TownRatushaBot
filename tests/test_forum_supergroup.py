@@ -618,3 +618,176 @@ async def test_cmd_appeal_and_verdict(db_session: AsyncSession, gov_users):
     assert "Оправдан" in ticket.verdict
 
 
+@pytest.mark.asyncio
+async def test_user_sync_middleware_for_callback_query(db_session: AsyncSession):
+    """Проверка, что UserSyncMiddleware обрабатывает CallbackQuery и инжектирует db_user."""
+    from bot.middlewares.user_sync import UserSyncMiddleware
+    from aiogram.types import CallbackQuery, User as TgUser
+
+    middleware = UserSyncMiddleware()
+    tg_user = TgUser(id=999888777, is_bot=False, first_name="Test", username="callback_tester")
+    mock_cb = MagicMock(spec=CallbackQuery)
+    mock_cb.from_user = tg_user
+
+    data = {"session": db_session, "event_from_user": tg_user}
+    called = False
+
+    async def dummy_handler(event, handler_data):
+        nonlocal called
+        called = True
+        assert "db_user" in handler_data
+        assert handler_data["db_user"].telegram_id == 999888777
+        return "success"
+
+    res = await middleware(dummy_handler, mock_cb, data)
+    assert called is True
+    assert res == "success"
+
+
+@pytest.mark.asyncio
+async def test_cb_report_settings_in_pm_and_close(db_session: AsyncSession, gov_users):
+    """Проверка работы меню настроек жалоб при кликах в ЛС и корректного закрытия."""
+    from bot.handlers.reports import cb_report_settings
+    from db.models.chat_settings import ChatSettings
+
+    mayor = gov_users["mayor"]
+    chat_settings = ChatSettings(chat_id=-100111222, reports_destination="both", reports_anonymous=False)
+    db_session.add(chat_settings)
+    await db_session.commit()
+
+    # Клик в ЛС (chat.type == 'private')
+    mock_cb = MagicMock()
+    mock_cb.data = "rep_set:dest:pm"
+    mock_cb.message.chat.id = mayor.telegram_id
+    mock_cb.message.chat.type = "private"
+    mock_cb.from_user.id = mayor.telegram_id
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+
+    await cb_report_settings(callback=mock_cb, session=db_session, db_user=mayor)
+    await db_session.refresh(chat_settings)
+    assert chat_settings.reports_destination == "pm"
+    mock_cb.answer.assert_called_once()
+
+    # Закрытие настроек
+    mock_cb.reset_mock()
+    mock_cb.data = "rep_set:close"
+    mock_cb.message.delete = AsyncMock()
+    await cb_report_settings(callback=mock_cb, session=db_session, db_user=mayor)
+    mock_cb.answer.assert_called_once()
+    mock_cb.message.delete.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cb_court_verdict_pardon_lifts_mute_and_unbans(db_session: AsyncSession, gov_users):
+    """Проверка, что судебное оправдание снимает и статус врага (бан), и мут в Telegram."""
+    from bot.handlers.court import cb_court_verdict
+    from core.ticket_service import TicketService
+    from core.enums import TicketCategory
+
+    judge = gov_users["judge"]
+    citizen = gov_users["citizen"]
+    citizen.is_enemy = True
+    citizen.warns_count = 5
+    await db_session.commit()
+
+    ticket = await TicketService.create_ticket(
+        session=db_session,
+        creator=citizen,
+        category=TicketCategory.COURT.value,
+        initial_text="Прошу снять бан и мут",
+    )
+
+    mock_cb = MagicMock()
+    mock_cb.data = f"court_verdict:{ticket.id}:pardon"
+    mock_cb.message.chat.id = -100333
+    mock_cb.message.chat.type = "supergroup"
+    mock_cb.from_user.id = judge.telegram_id
+    mock_cb.message.html_text = "Дело #{ticket.id}"
+    mock_cb.message.edit_text = AsyncMock()
+    mock_cb.answer = AsyncMock()
+    mock_bot = MagicMock()
+    mock_bot.unban_chat_member = AsyncMock()
+    mock_bot.restrict_chat_member = AsyncMock()
+    mock_bot.send_message = AsyncMock()
+    mock_cb.bot = mock_bot
+
+    await cb_court_verdict(callback=mock_cb, session=db_session, db_user=judge)
+    await db_session.refresh(citizen)
+    await db_session.refresh(ticket)
+
+    assert citizen.is_enemy is False
+    assert citizen.warns_count == 0
+    assert ticket.status == TicketStatus.CLOSED.value
+    mock_bot.unban_chat_member.assert_called_once()
+    mock_bot.restrict_chat_member.assert_called()
+    mock_cb.answer.assert_called_once_with("Вердикт успешно вынесен!")
+
+
+@pytest.mark.asyncio
+async def test_cmd_amnesty_in_pm_unmutes_in_supergroup(db_session: AsyncSession, gov_users):
+    """Проверка, что /амнистия, вызванная в ЛС бота, снимает мут и бан в целевой супергруппе."""
+    from bot.handlers.justice import cmd_amnesty
+    from db.models.chat_settings import ChatSettings
+
+    mayor = gov_users["mayor"]
+    citizen = gov_users["citizen"]
+    citizen.warns_count = 3
+    citizen.is_wanted = True
+    chat_settings = ChatSettings(chat_id=-100987654)
+    db_session.add(chat_settings)
+    await db_session.commit()
+
+    mock_msg = MagicMock()
+    mock_msg.chat.id = mayor.telegram_id
+    mock_msg.chat.type = "private"
+    mock_msg.from_user.id = mayor.telegram_id
+    mock_msg.text = f"/амнистия @{citizen.username} Личное помилование Мэра"
+    mock_msg.reply_to_message = None
+    mock_msg.answer = AsyncMock()
+
+    mock_bot = MagicMock()
+    mock_bot.restrict_chat_member = AsyncMock()
+    mock_bot.unban_chat_member = AsyncMock()
+    mock_msg.bot = mock_bot
+
+    await cmd_amnesty(message=mock_msg, session=db_session, db_user=mayor)
+    await db_session.refresh(citizen)
+
+    assert citizen.warns_count == 0
+    assert citizen.is_wanted is False
+    mock_msg.answer.assert_called_once()
+    assert "АКТ ГОРОДСКОЙ АМНИСТИИ" in mock_msg.answer.call_args[0][0]
+    # Должен быть вызван restrict_chat_member для супергруппы (-100987654)
+    mock_bot.restrict_chat_member.assert_called_once()
+    call_kwargs = mock_bot.restrict_chat_member.call_args.kwargs
+    assert call_kwargs["chat_id"] == -100987654
+    assert call_kwargs["user_id"] == citizen.telegram_id
+
+
+@pytest.mark.asyncio
+async def test_cmd_unmute_in_general_chat(db_session: AsyncSession, gov_users):
+    """Проверка работы /unmute в общем чате без юрисдикционной блокировки."""
+    from bot.handlers.moderation import cmd_unmute
+
+    warden = gov_users["warden"]
+    citizen = gov_users["citizen"]
+
+    mock_msg = MagicMock()
+    mock_msg.chat.id = -100555
+    mock_msg.chat.type = "supergroup"
+    mock_msg.message_thread_id = None
+    mock_msg.text = f"/unmute @{citizen.username} Осознал вину"
+    mock_msg.reply_to_message = None
+    mock_msg.answer = AsyncMock()
+    mock_bot = MagicMock()
+    mock_bot.restrict_chat_member = AsyncMock()
+    mock_bot.send_message = AsyncMock()
+    mock_msg.bot = mock_bot
+
+    await cmd_unmute(message=mock_msg, session=db_session, db_user=warden)
+    mock_msg.answer.assert_called_once()
+    assert "ПРАВА ПЕРЕПИСКИ ВОССТАНОВЛЕНЫ (РАЗМУТ)" in mock_msg.answer.call_args[0][0]
+    mock_bot.restrict_chat_member.assert_called()
+
+

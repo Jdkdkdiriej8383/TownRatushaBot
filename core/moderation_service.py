@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from aiogram import Bot
 from aiogram.types import ChatPermissions
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
 from db.models.punishment import Punishment
@@ -242,7 +243,17 @@ class ModerationService:
         """Снимает мут в Telegram и восстанавливает права отправки сообщений."""
         HierarchyService.validate_seniority(initiator=issuer, target=target, action_name="размут")
 
-        if bot and chat_id:
+        if chat_id and chat_id > 0:
+            from config import settings
+            target_chat = settings.MAIN_CHAT_ID
+            if not target_chat:
+                from db.models.chat_settings import ChatSettings
+                known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
+                if known:
+                    target_chat = known
+            chat_id = target_chat or chat_id
+
+        if bot and chat_id and chat_id < 0:
             try:
                 await bot.restrict_chat_member(
                     chat_id=chat_id,
@@ -258,10 +269,32 @@ class ModerationService:
                         can_send_polls=True,
                         can_send_other_messages=True,
                         can_add_web_page_previews=True,
+                        can_invite_users=True,
                     ),
+                    use_independent_chat_permissions=True,
                 )
-            except Exception as e:
-                logger.warning("Ошибка Telegram при размуте: %s", e)
+            except Exception as e1:
+                logger.warning("Ошибка Telegram при снятии мута с use_independent_chat_permissions: %s, пробуем стандартный...", e1)
+                try:
+                    await bot.restrict_chat_member(
+                        chat_id=chat_id,
+                        user_id=target.telegram_id,
+                        permissions=ChatPermissions(
+                            can_send_messages=True,
+                            can_send_audios=True,
+                            can_send_documents=True,
+                            can_send_photos=True,
+                            can_send_videos=True,
+                            can_send_video_notes=True,
+                            can_send_voice_notes=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_invite_users=True,
+                        ),
+                    )
+                except Exception as e2:
+                    logger.warning("Ошибка Telegram при стандартном снятии мута: %s", e2)
 
         punishment = await cls.log_punishment(
             session=session,
@@ -355,12 +388,22 @@ class ModerationService:
         """Снимает бан в Telegram и восстанавливает гражданство."""
         HierarchyService.validate_seniority(initiator=issuer, target=target, action_name="разбан")
 
+        if chat_id and chat_id > 0:
+            from config import settings
+            target_chat = settings.MAIN_CHAT_ID
+            if not target_chat:
+                from db.models.chat_settings import ChatSettings
+                known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
+                if known:
+                    target_chat = known
+            chat_id = target_chat or chat_id
+
         target.is_enemy = False
         target.enemy_reason = None
         if target.role_level == PositionLevel.ENEMY.value:
             target.role_level = PositionLevel.CITIZEN.value
 
-        if bot and chat_id:
+        if bot and chat_id and chat_id < 0:
             try:
                 await bot.unban_chat_member(chat_id=chat_id, user_id=target.telegram_id, only_if_banned=True)
             except Exception as e:

@@ -208,7 +208,7 @@ async def cmd_mute(message: Message, session: AsyncSession, db_user: User):
     )
 
 
-@router.message(Command("unmute", "размут"), TopicCommandFilter(["reports", "admin", "court", "tickets"]))
+@router.message(Command("unmute", "размут"))
 async def cmd_unmute(message: Message, session: AsyncSession, db_user: User):
     """Досрочное снятие мута: /unmute [причина]"""
     if db_user.government_rank < 1:

@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, ChatPermissions
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from db.models import User, Law, Punishment, Fine
+from db.models import User, Law, Punishment, Fine, ChatSettings
 from core.enums import PositionLevel, PunishmentType, FineStatus
 from core.regulators import RegulatorService, format_duration
 from core.laws_service import LawService
@@ -405,6 +405,12 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
 
     raw_args = message.text.split()[1:] if message.text else []
 
+    target_chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
+    if not target_chat_id or target_chat_id > 0:
+        known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
+        if known:
+            target_chat_id = known
+
     # 1. Режим общегородской амнистии (/амнистия все / /амнистия all)
     if raw_args and raw_args[0].lower() in ("все", "all", "всё"):
         manifest_text = " ".join(raw_args[1:]).strip() if len(raw_args) > 1 else "Всеобщая городская амнистия"
@@ -417,15 +423,69 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
         for f in all_fines:
             f.status = FineStatus.CANCELLED.value
 
-        # Снимаем варны, выговоры и розыск со всех граждан
+        # Снимаем варны, выговоры и розыск со всех граждан + снимаем муты и баны в Telegram
         users_res = await session.scalars(
-            select(User).where((User.warns_count > 0) | (User.reprimands_count > 0) | (User.is_wanted.is_(True)))
+            select(User).where((User.warns_count > 0) | (User.reprimands_count > 0) | (User.is_wanted.is_(True)) | (User.is_enemy.is_(True)))
         )
         affected_users = list(users_res.all())
         for u in affected_users:
             u.warns_count = 0
             u.reprimands_count = 0
             u.is_wanted = False
+            if u.is_enemy:
+                u.is_enemy = False
+                u.enemy_reason = None
+                if u.role_level == PositionLevel.ENEMY.value:
+                    u.role_level = PositionLevel.CITIZEN.value
+
+            if target_chat_id and target_chat_id < 0 and message.bot:
+                try:
+                    await message.bot.restrict_chat_member(
+                        chat_id=target_chat_id,
+                        user_id=u.telegram_id,
+                        permissions=ChatPermissions(
+                            can_send_messages=True,
+                            can_send_audios=True,
+                            can_send_documents=True,
+                            can_send_photos=True,
+                            can_send_videos=True,
+                            can_send_video_notes=True,
+                            can_send_voice_notes=True,
+                            can_send_polls=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True,
+                            can_invite_users=True,
+                        ),
+                        use_independent_chat_permissions=True,
+                    )
+                except Exception:
+                    try:
+                        await message.bot.restrict_chat_member(
+                            chat_id=target_chat_id,
+                            user_id=u.telegram_id,
+                            permissions=ChatPermissions(
+                                can_send_messages=True,
+                                can_send_audios=True,
+                                can_send_documents=True,
+                                can_send_photos=True,
+                                can_send_videos=True,
+                                can_send_video_notes=True,
+                                can_send_voice_notes=True,
+                                can_send_polls=True,
+                                can_send_other_messages=True,
+                                can_add_web_page_previews=True,
+                            ),
+                        )
+                    except Exception:
+                        pass
+                try:
+                    await message.bot.unban_chat_member(
+                        chat_id=target_chat_id,
+                        user_id=u.telegram_id,
+                        only_if_banned=True,
+                    )
+                except Exception:
+                    pass
 
         await session.commit()
 
@@ -448,7 +508,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ Обнулены предупреждения и выговоры у <b>{len(affected_users)}</b> жителей\n"
             f"✅ Аннулировано <b>{len(all_fines)}</b> открытых штрафов казны\n"
-            "✅ Сняты все ориентировки городского розыска\n"
+            "✅ Сняты все ориентировки городского розыска и муты в чате\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "<i>Ратуша города объявляет новый отсчет правопорядка.</i>"
         )
@@ -502,7 +562,10 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
         f.status = FineStatus.CANCELLED.value
 
     # Разблокируем в чате Telegram (размут + разбан)
-    if message.chat.type in ("group", "supergroup"):
+    telegram_unmute_status = "снят ✅"
+
+    # Если вызов сделан в группе и есть message.chat.restrict
+    if message.chat.type in ("group", "supergroup") and hasattr(message.chat, "restrict"):
         try:
             await message.chat.restrict(
                 user_id=target_user.telegram_id,
@@ -517,15 +580,75 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
                     can_send_polls=True,
                     can_send_other_messages=True,
                     can_add_web_page_previews=True,
-                )
+                    can_invite_users=True,
+                ),
             )
-        except Exception as e:
-            logger.debug("Не удалось снять мут в чате: %s", e)
+        except Exception:
+            try:
+                await message.chat.restrict(
+                    user_id=target_user.telegram_id,
+                    permissions=ChatPermissions(can_send_messages=True),
+                )
+            except Exception as e2:
+                telegram_unmute_status = f"ошибка ({e2})"
+                logger.warning("Не удалось снять мут через message.chat: %s", e2)
 
         try:
             await message.chat.unban(user_id=target_user.telegram_id, only_if_banned=True)
         except Exception as e:
             logger.debug("Не удалось разбанить в чате: %s", e)
+
+    # Если вызов сделан из ЛС или message.bot доступен для целевого супергруппового чата
+    elif message.bot and target_chat_id and target_chat_id < 0:
+        try:
+            await message.bot.restrict_chat_member(
+                chat_id=target_chat_id,
+                user_id=target_user.telegram_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_audios=True,
+                    can_send_documents=True,
+                    can_send_photos=True,
+                    can_send_videos=True,
+                    can_send_video_notes=True,
+                    can_send_voice_notes=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_invite_users=True,
+                ),
+                use_independent_chat_permissions=True,
+            )
+        except Exception:
+            try:
+                await message.bot.restrict_chat_member(
+                    chat_id=target_chat_id,
+                    user_id=target_user.telegram_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_audios=True,
+                        can_send_documents=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
+                        can_send_video_notes=True,
+                        can_send_voice_notes=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True,
+                    ),
+                )
+            except Exception as e2:
+                telegram_unmute_status = f"ошибка ({e2})"
+                logger.warning("Не удалось снять мут в Telegram для %s: %s", target_user.telegram_id, e2)
+
+        try:
+            await message.bot.unban_chat_member(
+                chat_id=target_chat_id,
+                user_id=target_user.telegram_id,
+                only_if_banned=True,
+            )
+        except Exception as e:
+            logger.debug("Не удалось разбанить в Telegram для %s: %s", target_user.telegram_id, e)
 
     # Запись в судебный реестр
     await LawService.log_punishment(
@@ -554,7 +677,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
         f"✅ Списано непогашенных штрафов: <b>{len(user_fines)}</b>\n"
         "✅ Снят статус розыска\n"
         f"{enemy_line}"
-        "✅ Разблокирована отправка сообщений в чате\n"
+        f"🔊 Мут и ограничения чата: <b>{telegram_unmute_status}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "<i>Судебные претензии сняты. Запись внесена в городской реестр.</i>"
     )

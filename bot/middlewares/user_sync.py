@@ -22,7 +22,7 @@ class UserSyncMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         session: AsyncSession = data.get("session")
-        event_from_user: TgUser = data.get("event_from_user")
+        event_from_user: TgUser = data.get("event_from_user") or getattr(event, "from_user", None)
 
         if session and event_from_user and not event_from_user.is_bot:
             query = select(User).where(User.telegram_id == event_from_user.id)

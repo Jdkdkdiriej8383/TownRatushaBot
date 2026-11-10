@@ -124,6 +124,10 @@ async def cmd_report_settings(message: Message, session: AsyncSession, db_user: 
     target_chat_id = message.chat.id
     if message.chat.type == "private":
         target_chat_id = settings.MAIN_CHAT_ID or message.chat.id
+        if not target_chat_id or target_chat_id > 0:
+            known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
+            if known:
+                target_chat_id = known
 
     is_admin = False
     if (
@@ -132,6 +136,13 @@ async def cmd_report_settings(message: Message, session: AsyncSession, db_user: 
         or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
     ):
         is_admin = True
+    elif target_chat_id and target_chat_id < 0 and message.from_user and message.bot:
+        try:
+            member = await message.bot.get_chat_member(chat_id=target_chat_id, user_id=message.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
     elif message.chat.type in ("group", "supergroup") and message.from_user:
         try:
             member = await message.chat.get_member(message.from_user.id)
@@ -160,6 +171,14 @@ async def cmd_report_settings(message: Message, session: AsyncSession, db_user: 
 
 @router.callback_query(F.data.startswith("rep_set:"))
 async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_user: User):
+    target_chat_id = callback.message.chat.id if callback.message and callback.message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
+    if not target_chat_id or target_chat_id > 0:
+        known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
+        if known:
+            target_chat_id = known
+        elif callback.message:
+            target_chat_id = callback.message.chat.id
+
     is_admin = False
     if (
         db_user.government_rank >= 3
@@ -167,6 +186,13 @@ async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_
         or (db_user.username and db_user.username.lower() == settings.OWNER_USERNAME.lower())
     ):
         is_admin = True
+    elif target_chat_id and target_chat_id < 0 and callback.bot:
+        try:
+            member = await callback.bot.get_chat_member(chat_id=target_chat_id, user_id=callback.from_user.id)
+            if getattr(member, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
     elif callback.message and callback.message.chat.type in ("group", "supergroup"):
         try:
             member = await callback.message.chat.get_member(callback.from_user.id)
@@ -179,7 +205,7 @@ async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_
         await callback.answer("🚫 У вас нет прав для изменения настроек жалоб!", show_alert=True)
         return
 
-    chat_settings = await _get_or_create_chat_settings(session, callback.message.chat.id)
+    chat_settings = await _get_or_create_chat_settings(session, target_chat_id)
     action = callback.data.split(":")[1]
 
     if action == "dest":
@@ -196,11 +222,11 @@ async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_
 
     elif action == "bind_topic":
         thread_id = getattr(callback.message, "message_thread_id", None)
-        if thread_id:
+        if thread_id and callback.message and callback.message.chat.type in ("group", "supergroup"):
             chat_settings.reports_topic_id = thread_id
             await TopicService.set_topic_mapping(
                 session=session,
-                chat_id=callback.message.chat.id,
+                chat_id=target_chat_id,
                 topic_type=TopicType.REPORTS.value,
                 thread_id=thread_id,
                 topic_name=f"Тема #{thread_id}",
@@ -210,31 +236,36 @@ async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_
         else:
             chat_settings.reports_topic_id = None
             await session.commit()
-            await callback.answer("⚠️ Вы в общем чате. Перейдите в нужную тему форума для привязки.", show_alert=True)
+            await callback.answer("⚠️ Вы в общем чате или ЛС. Перейдите в нужную тему форума группы для привязки.", show_alert=True)
 
     elif action == "close":
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+        await callback.answer()
+        if callback.message:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
         return
 
     elif action == "refresh":
         await callback.answer("Обновлено")
+    else:
+        await callback.answer()
 
     topic_id = chat_settings.reports_topic_id
     if topic_id is None:
         topic_id = await TopicService.get_topic_thread_id(
-            session=session, chat_id=callback.message.chat.id, topic_type=TopicType.REPORTS.value
+            session=session, chat_id=target_chat_id, topic_type=TopicType.REPORTS.value
         )
-    topic_name = await TopicService.get_topic_name(session, callback.message.chat.id, topic_id) if topic_id else "Не привязан (fallback)"
+    topic_name = await TopicService.get_topic_name(session, target_chat_id, topic_id) if topic_id else "Не привязан (fallback)"
 
     text = render_report_settings_text(chat_settings, topic_name)
     kb = get_report_settings_keyboard(chat_settings)
-    try:
-        await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        pass
+    if callback.message:
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
 
 
 @router.message(Command("report", "репорт", "жалоба"))
