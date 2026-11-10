@@ -14,6 +14,7 @@ BOT_COMMANDS = [
     BotCommand(command="start", description="Начать работу с ботом"),
     BotCommand(command="help", description="Справка по командам (/помощь)"),
     BotCommand(command="passport", description="Паспорт гражданина (/паспорт)"),
+    BotCommand(command="profile", description="Профиль гражданина (/профиль)"),
     BotCommand(command="nick", description="Привязать Minecraft ник (/ник)"),
     BotCommand(command="vacation", description="Оформить отпуск / вернуться (/отпуск)"),
     BotCommand(command="position", description="Управление должностями (/должность)"),
@@ -29,13 +30,33 @@ BOT_COMMANDS = [
     BotCommand(command="reprimand", description="Служебный выговор (/выговор)"),
     BotCommand(command="unreprimand", description="Снять выговор (/снять_выговор)"),
     BotCommand(command="promote", description="Выдать права админа чата (/выдать_адм)"),
-    BotCommand(command="demote", description="Снять права админа чата (/снять_адм)"),
+    BotCommand(command="demote", description="Снять с должности / админки (/разжаловать)"),
     BotCommand(command="referendum", description="Общегородской референдум (/референдум)"),
     BotCommand(command="jury", description="Суд присяжных (/присяжные)"),
     BotCommand(command="regulators", description="Регуляторы и защиты чата (/регуляторы)"),
     BotCommand(command="anticaps", description="Регулятор антикапса (/антикапс)"),
     BotCommand(command="antispam", description="Регулятор медиа-спама (/спам)"),
     BotCommand(command="antilinks", description="Регулятор ссылок и рекламы (/ссылки)"),
+    BotCommand(command="report", description="Подать жалобу на нарушителя (/репорт, !жб)"),
+    BotCommand(command="ticket_panel", description="Панель государственной приемной (/приемная)"),
+    BotCommand(command="claim", description="Взять обращение в работу (/принять)"),
+    BotCommand(command="transfer", description="Перенаправить обращение (/передать)"),
+    BotCommand(command="close", description="Закрыть обращение с вердиктом (/закрыть)"),
+    BotCommand(command="warn", description="Выдать предупреждение (/варн)"),
+    BotCommand(command="unwarn", description="Снять предупреждение (/анварн)"),
+    BotCommand(command="mute", description="Ограничить переписку (/мут)"),
+    BotCommand(command="unmute", description="Снять ограничение переписки (/размут)"),
+    BotCommand(command="kick", description="Исключить из чата (/кик)"),
+    BotCommand(command="ban", description="Изгнание из города / бан (/бан)"),
+    BotCommand(command="unban", description="Снять бан / помиловать (/разбан)"),
+    BotCommand(command="clear", description="Очистить сообщения чата (/del)"),
+    BotCommand(command="appeal", description="Подать судебную апелляцию (/апелляция)"),
+    BotCommand(command="verdict", description="Вынести судебный вердикт (/вердикт)"),
+    BotCommand(command="court", description="Зал государственного суда (/суд)"),
+    BotCommand(command="setrole", description="Назначить государственную должность (/роль)"),
+    BotCommand(command="staff", description="Государственный аппарат по рангам (/состав)"),
+    BotCommand(command="decree", description="Государственный указ Мэра/Премьера (/указ)"),
+    BotCommand(command="settopic", description="Привязать топик форума (/топик)"),
     BotCommand(command="sync_menu", description="Обновить меню команд (/обновить_меню)"),
 ]
 
@@ -70,4 +91,3 @@ async def setup_bot_commands(bot: Bot) -> int:
 
     logger.info("Меню команд Telegram успешно установлено во всех областях (%d команд).", len(BOT_COMMANDS))
     return len(BOT_COMMANDS)
-

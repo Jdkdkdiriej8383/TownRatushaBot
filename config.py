@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     MAIN_CHAT_ID: Optional[int] = Field(default=None, description="ID основного супергруппового чата города")
     LOG_CHAT_ID: Optional[int] = Field(default=None, description="ID чата судебного протокола и логов")
 
+    # Forum Topics (Темы супергруппы)
+    COMMUNITY_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы Общего чата / Флудилки")
+    REPORTS_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы Жалоб / Модерации")
+    TICKETS_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы Приемной граждан")
+    COURT_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы Зала Суда / Апелляций")
+    ADMIN_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы Штаба / Кабинета администрации")
+    DECREES_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы Государственных указов")
+    LOG_TOPIC_ID: Optional[int] = Field(default=None, description="ID темы аудита и логов")
+
     # City Owner & Creator
     OWNER_ID: int = Field(default=1965081517, description="Telegram ID владельца/овнера города")
     OWNER_USERNAME: str = Field(default="DivniDed", description="Username овнера города")

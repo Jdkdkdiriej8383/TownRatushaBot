@@ -14,14 +14,14 @@ from config import settings
 router = Router(name="passport_router")
 
 
-@router.message(Command("паспорт", "passport"))
+@router.message(Command("паспорт", "passport", "профиль", "profile"))
 async def cmd_passport(message: Message, session: AsyncSession, db_user: User):
     """
-    Команда /паспорт — электронный паспорт гражданина города.
-    Отображает: Minecraft-ник, Должность, статус отпуска (п. 3.25),
-    историю штрафов и статус розыска.
+    Команда /паспорт или /профиль — электронный паспорт гражданина города.
+    Отображает: Ранг (0-4), Должность, Minecraft-ник, статус отпуска,
+    историю штрафов, варны, выговоры и служебные заслуги.
     """
-    raw_args = message.text.split()[1:]
+    raw_args = (message.text or "").split()[1:]
     target_user, _ = await extract_target_user(message, session, raw_args)
 
     user = target_user or db_user
@@ -49,23 +49,32 @@ async def cmd_passport(message: Message, session: AsyncSession, db_user: User):
 
     status_badge = ""
     if user.is_enemy:
-        status_badge = "\n☠️ <b>ВРАГ ГОРОДА (ПОРАЖЕНИЕ В ПРАВАХ)</b>\n"
+        status_badge = "\n☠️ <b>ВРАГ ГОРОДА (ИЗГНАНИЕ / БАН)</b>\n"
     elif user.is_wanted:
         status_badge = "\n🚨 <b>ОБЪЯВЛЕН В ОБЩЕГОРОДСКОЙ РОЗЫСК</b>\n"
 
+    role_title = user.custom_title or user.position_title
+    rank = user.government_rank
+
+    staff_merit_line = ""
+    if user.is_staff:
+        staff_merit_line = f"🎖️ <b>Закрытых обращений (заслуги):</b> {user.closed_tickets_count or 0}\n"
+
     passport_text = (
-        f"🏛 <b>ПАСПОРТ ГРАЖДАНИНА ГОРОДА</b>\n"
+        f"🏛 <b>ПАСПОРТ ГРАЖДАНИНА ГОРОДА / ПРОФИЛЬ</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{status_badge}"
-        f"👤 <b>Имя жителя:</b> {user.full_name}\n"
+        f"👤 <b>Имя жителя:</b> {user.full_name} (@{user.username or '—'})\n"
+        f"🆔 <b>Telegram ID:</b> <code>{user.telegram_id}</code>\n"
         f"🎮 <b>Minecraft Nick:</b> <code>{user.minecraft_nick or 'Не зарегистрирован (введите /ник)'}</code>\n"
-        f"🎖 <b>Должность:</b> <b>{user.position_title}</b> (Уровень {user.role_level})\n"
+        f"🎖 <b>Государственный ранг:</b> <b>Ранг {rank}</b> ({role_title})\n"
+        f"{staff_merit_line}"
         f"🏖 <b>Статус отпуска (п. 3.25):</b> {vacation_info}\n"
         f"💰 <b>Задолженность по штрафам:</b> <code>{total_debt:,}</code> валюты\n"
-        f"⚠️ <b>Предупреждений:</b> {user.warns_count}\n"
-        f"📋 <b>Служебных выговоров:</b> {getattr(user, 'reprimands_count', 0)}/3\n"
+        f"⚠️ <b>Предупреждений:</b> <b>{user.warns_count or 0}/5</b>\n"
+        f"📋 <b>Служебных выговоров:</b> <b>{getattr(user, 'reprimands_count', 0)}/3</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Паспорт зарегистрирован в Городской Ратуше.</i>"
+        f"<i>Зарегистрировано в Государственном Реестре Ратуши.</i>"
     )
     await message.answer(passport_text)
 
@@ -77,7 +86,7 @@ async def cmd_set_nick(message: Message, session: AsyncSession, db_user: User):
     Администрация города (уровни 4-5) и Владелец могут принудительно привязать ник:
     /ник @юзер [minecraft_ник] или ответом на сообщение /ник [minecraft_ник].
     """
-    raw_args = message.text.split()[1:]
+    raw_args = (message.text or "").split()[1:]
     target_user, remaining_args = await extract_target_user(message, session, raw_args)
 
     is_admin = (
@@ -117,7 +126,7 @@ async def cmd_set_nick(message: Message, session: AsyncSession, db_user: User):
         return
 
     # Обычная привязка своего ника пользователем
-    args = message.text.split(maxsplit=1)
+    args = (message.text or "").split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "Использование: <code>/ник [Ваш_Minecraft_Ник]</code>\n"
@@ -151,7 +160,7 @@ async def cmd_vacation(message: Message, session: AsyncSession, db_user: User):
     Команда /отпуск [дней] — оформление статуса отпуска по п. 3.25 Городского Свода Законов.
     Максимум 30 дней.
     """
-    args = message.text.split(maxsplit=1)
+    args = (message.text or "").split(maxsplit=1)
     if len(args) < 2:
         await message.answer(
             "Использование: <code>/отпуск [кол-во дней от 1 до 30]</code>\n"
@@ -191,7 +200,7 @@ async def cmd_set_position(message: Message, session: AsyncSession, db_user: Use
     Повышение/понижение жителя в должности.
     Строгая проверка прав назначающего и субординации.
     """
-    raw_args = message.text.split()[1:]
+    raw_args = (message.text or "").split()[1:]
     target_user, remaining_args = await extract_target_user(message, session, raw_args)
 
     if not target_user or not remaining_args:
@@ -229,8 +238,6 @@ async def cmd_set_position(message: Message, session: AsyncSession, db_user: Use
         target_user.role_level = new_level
         new_title = PositionLevel.get_title(new_level)
         await session.commit()
-
-        action = "повышен" if new_level > target_user.role_level else "переведен"
 
         await message.answer(
             f"🎖 <b>ПРИКАЗ О НАЗНАЧЕНИИ НА ДОЛЖНОСТЬ</b>\n"

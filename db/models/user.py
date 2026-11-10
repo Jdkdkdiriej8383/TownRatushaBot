@@ -8,6 +8,8 @@ from core.enums import PositionLevel
 if TYPE_CHECKING:
     from db.models.fine import Fine
     from db.models.punishment import Punishment
+    from db.models.report import Report
+    from db.models.ticket import Ticket
 
 
 class User(Base):
@@ -19,8 +21,10 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # Иерархия должностей (0-5, либо -1 для Врага города)
-    # Запрещено слово 'ранг', поле названо role_level / position_level
     role_level: Mapped[int] = mapped_column(Integer, default=PositionLevel.CITIZEN, index=True)
+
+    # Кастомная государственная должность (Мэр, Премьер-министр, Судья, Министр, и т.д.)
+    custom_title: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Спец-статус: Враг города
     is_enemy: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -39,6 +43,11 @@ class User(Base):
     # Счетчики нарушений
     warns_count: Mapped[int] = mapped_column(Integer, default=0)
     reprimands_count: Mapped[int] = mapped_column(Integer, default=0)  # Служебные выговоры (при 3/3 - отстранение)
+
+    # Статистика тикетов и репортов
+    closed_tickets_count: Mapped[int] = mapped_column(Integer, default=0)  # Служебные заслуги
+    false_reports_count: Mapped[int] = mapped_column(Integer, default=0)   # Счетчик ложных вызовов
+    reports_blocked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Временные метки
     created_at: Mapped[datetime] = mapped_column(
@@ -64,16 +73,49 @@ class User(Base):
         foreign_keys="Punishment.user_id",
         cascade="all, delete-orphan"
     )
+    reports_filed: Mapped[List["Report"]] = relationship(
+        "Report",
+        back_populates="reporter",
+        foreign_keys="Report.reporter_id",
+        cascade="all, delete-orphan"
+    )
+    tickets_created: Mapped[List["Ticket"]] = relationship(
+        "Ticket",
+        back_populates="creator",
+        foreign_keys="Ticket.creator_id",
+        cascade="all, delete-orphan"
+    )
+
+    @property
+    def government_rank(self) -> int:
+        """Государственный ранг (0 - Гражданин, 1 - Помощник, 2 - Блюститель, 3 - Администрация, 4 - Высшая администрация)."""
+        return PositionLevel.get_rank(self.role_level)
 
     @property
     def position_title(self) -> str:
         if self.is_enemy:
             return "Враг города"
-        return PositionLevel.get_title(self.role_level)
+        return self.custom_title or PositionLevel.get_title(self.role_level)
+
+    @property
+    def is_supreme_admin(self) -> bool:
+        return self.role_level >= PositionLevel.SENIOR_ADMINISTRATION.value
+
+    @property
+    def is_middle_admin(self) -> bool:
+        return self.role_level >= PositionLevel.ADMINISTRATION.value
+
+    @property
+    def is_warden_or_higher(self) -> bool:
+        return self.role_level >= PositionLevel.CHAT_WARDEN.value
+
+    @property
+    def is_staff(self) -> bool:
+        return not self.is_enemy and self.role_level >= PositionLevel.ASSISTANT.value
 
     @property
     def is_citizen_or_higher(self) -> bool:
-        return not self.is_enemy and self.role_level >= PositionLevel.CITIZEN
+        return not self.is_enemy and self.role_level >= PositionLevel.CITIZEN.value
 
     def __repr__(self) -> str:
-        return f"<User tg={self.telegram_id} nick={self.minecraft_nick} role={self.role_level} rep={self.reprimands_count}>"
+        return f"<User tg={self.telegram_id} nick={self.minecraft_nick} role={self.role_level} title={self.position_title}>"
