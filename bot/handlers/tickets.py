@@ -162,6 +162,21 @@ async def cb_ticket_category_selected(callback: CallbackQuery, session: AsyncSes
         if thread_id:
             await TicketService.bind_forum_topic(session, ticket.id, thread_id)
 
+    # Определение дежурных сотрудников для уведомления
+    staff_pings = []
+    if category == TicketCategory.COURT.value:
+        q = select(User).where(User.custom_title.in_(["Судья", "Конституционный судья"]))
+    elif category == TicketCategory.MAYOR.value:
+        q = select(User).where(User.custom_title.in_(["Мэр", "Премьер-министр", "Заместитель мэра"]))
+    elif category == TicketCategory.STAFF_COMPLAINT.value:
+        q = select(User).where(User.role_level >= PositionLevel.ADMINISTRATION.value)
+    else:
+        q = select(User).where(User.role_level >= PositionLevel.ASSISTANT.value)
+
+    staff_members = (await session.scalars(q)).all()
+    pings_list = [f"@{u.username}" for u in staff_members if u.username]
+    staff_notice = " ".join(pings_list[:5]) if pings_list else "дежурные сотрудники ведомства"
+
     # 2. Отправляем карточку тикета в созданную тему
     card = (
         f"🏛️ <b>ГОСУДАРСТВЕННОЕ ОБРАЩЕНИЕ #{ticket.id}</b>\n"
@@ -171,7 +186,8 @@ async def cb_ticket_category_selected(callback: CallbackQuery, session: AsyncSes
         f"• <b>Целевое ведомство:</b> <i>{ticket.target_role}</i>\n"
         f"• <b>Статус:</b> 🟡 <i>Ожидает рассмотрения</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Уполномоченные лица уведомлены. Заявитель, подробно опишите суть вашей проблемы или вопроса в этом топике."
+        f"🔔 <b>Уведомление:</b> {staff_notice}\n\n"
+        f"Заявитель (@{db_user.username or 'гражданин'}), подробно опишите суть вашей проблемы или вопроса в этом топике."
     )
 
     try:
@@ -335,6 +351,27 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
     except Exception as e:
         logger.warning(f"Failed to close forum topic {thread_id}: {e}")
 
+    # Отправка протокола в архив логов
+    try:
+        log_thread_id = await TopicService.get_topic_thread_id(session, message.chat.id, TopicType.LOGS.value)
+        audit_card = (
+            f"📁 <b>АРХИВ ОБРАЩЕНИЙ: ТИКЕТ #{ticket.id} ЗАКРЫТ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Заявитель:</b> ID <code>{ticket.creator_telegram_id}</code>\n"
+            f"• <b>Инстанция:</b> {ticket.category}\n"
+            f"• <b>Исполнитель:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+            f"• <b>Итоговый вердикт:</b> <i>{verdict}</i>\n"
+            f"• <b>Заслуга сотрудника:</b> {db_user.closed_tickets_count} закрытых тикетов\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        await message.bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=log_thread_id,
+            text=audit_card,
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить лог закрытия тикета: {e}")
+
 
 @router.callback_query(F.data.startswith("ticket_close_btn:"))
 async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db_user: User):
@@ -373,3 +410,24 @@ async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db
             await callback.bot.close_forum_topic(chat_id=callback.message.chat.id, message_thread_id=thread_id)
         except Exception:
             pass
+
+    # Отправка протокола в архив логов
+    try:
+        log_thread_id = await TopicService.get_topic_thread_id(session, callback.message.chat.id, TopicType.LOGS.value)
+        audit_card = (
+            f"📁 <b>АРХИВ ОБРАЩЕНИЙ: ТИКЕТ #{ticket.id} ЗАКРЫТ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Заявитель:</b> ID <code>{ticket.creator_telegram_id}</code>\n"
+            f"• <b>Инстанция:</b> {ticket.category}\n"
+            f"• <b>Исполнитель:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+            f"• <b>Итоговый вердикт:</b> <i>Быстрое закрытие (вопрос решен)</i>\n"
+            f"• <b>Заслуга сотрудника:</b> {db_user.closed_tickets_count} закрытых тикетов\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        await callback.bot.send_message(
+            chat_id=callback.message.chat.id,
+            message_thread_id=log_thread_id,
+            text=audit_card,
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить лог закрытия тикета: {e}")
