@@ -18,6 +18,9 @@ class Ticket(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
+    # Чат супергруппы
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
     # Заявитель
     creator_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     creator_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

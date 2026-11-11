@@ -162,3 +162,33 @@ class TopicService:
                 return True, current_topic_name, target_display
 
         return False, current_topic_name, target_display
+
+    @classmethod
+    async def get_primary_group_chat_id(cls, session: AsyncSession) -> Optional[int]:
+        """Определяет ID основной супергруппы города для выполнения административных действий."""
+        from config import settings
+        if settings.MAIN_CHAT_ID and settings.MAIN_CHAT_ID < 0:
+            return settings.MAIN_CHAT_ID
+
+        # 1. Из topic_configs (где настроены темы форума)
+        topic_chat = await session.scalar(
+            select(TopicConfig.chat_id)
+            .where(TopicConfig.chat_id < 0)
+            .order_by(TopicConfig.id.desc())
+            .limit(1)
+        )
+        if topic_chat:
+            return topic_chat
+
+        # 2. Из chat_settings (где сохранены настройки группы)
+        from db.models.chat_settings import ChatSettings
+        settings_chat = await session.scalar(
+            select(ChatSettings.chat_id)
+            .where(ChatSettings.chat_id < 0)
+            .order_by(ChatSettings.chat_id.desc())
+            .limit(1)
+        )
+        if settings_chat:
+            return settings_chat
+
+        return None

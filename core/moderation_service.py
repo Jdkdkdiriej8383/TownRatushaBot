@@ -58,12 +58,14 @@ class ModerationService:
         reason: str,
         duration_seconds: Optional[int] = None,
         law_article: Optional[str] = None,
+        chat_id: Optional[int] = None,
     ) -> Punishment:
         """Сохраняет запись о взыскании в судебно-следственный протокол."""
         p_type = punishment_type.value if hasattr(punishment_type, "value") else str(punishment_type)
         punishment = Punishment(
             user_id=target_user.id,
             target_telegram_id=target_user.telegram_id,
+            chat_id=chat_id,
             issuer_id=issuer_user.id,
             issuer_telegram_id=issuer_user.telegram_id,
             punishment_type=p_type,
@@ -243,17 +245,12 @@ class ModerationService:
         """Снимает мут в Telegram и восстанавливает права отправки сообщений."""
         HierarchyService.validate_seniority(initiator=issuer, target=target, action_name="размут")
 
-        if chat_id and chat_id > 0:
-            from config import settings
-            target_chat = settings.MAIN_CHAT_ID
-            if not target_chat:
-                from db.models.chat_settings import ChatSettings
-                known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-                if known:
-                    target_chat = known
+        if not chat_id or chat_id > 0:
+            target_chat = await TopicService.get_primary_group_chat_id(session)
             chat_id = target_chat or chat_id
 
         if bot and chat_id and chat_id < 0:
+            unmute_err = None
             try:
                 await bot.restrict_chat_member(
                     chat_id=chat_id,
@@ -294,7 +291,11 @@ class ModerationService:
                         ),
                     )
                 except Exception as e2:
+                    unmute_err = e2
                     logger.warning("Ошибка Telegram при стандартном снятии мута: %s", e2)
+
+            if unmute_err:
+                raise TownBaseException(f"Ошибка Telegram при размуте: {unmute_err}")
 
         punishment = await cls.log_punishment(
             session=session,
@@ -302,6 +303,7 @@ class ModerationService:
             issuer_user=issuer,
             punishment_type=PunishmentType.UNMUTE,
             reason=reason,
+            chat_id=chat_id if chat_id and chat_id < 0 else None,
         )
         await session.commit()
         return punishment
@@ -388,14 +390,8 @@ class ModerationService:
         """Снимает бан в Telegram и восстанавливает гражданство."""
         HierarchyService.validate_seniority(initiator=issuer, target=target, action_name="разбан")
 
-        if chat_id and chat_id > 0:
-            from config import settings
-            target_chat = settings.MAIN_CHAT_ID
-            if not target_chat:
-                from db.models.chat_settings import ChatSettings
-                known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-                if known:
-                    target_chat = known
+        if not chat_id or chat_id > 0:
+            target_chat = await TopicService.get_primary_group_chat_id(session)
             chat_id = target_chat or chat_id
 
         target.is_enemy = False
@@ -415,6 +411,7 @@ class ModerationService:
             issuer_user=issuer,
             punishment_type=PunishmentType.UNBAN,
             reason=reason,
+            chat_id=chat_id if chat_id and chat_id < 0 else None,
         )
         await session.commit()
         return punishment

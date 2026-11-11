@@ -25,12 +25,14 @@ class TicketService:
         creator: User,
         category: str,
         initial_text: Optional[str] = None,
+        chat_id: Optional[int] = None,
     ) -> Ticket:
         """Создает новое обращение гражданина в БД."""
         target_role = CATEGORY_DEFAULT_ROLES.get(category, "Администрация")
         ticket = Ticket(
             creator_id=creator.id,
             creator_telegram_id=creator.telegram_id,
+            chat_id=chat_id,
             category=category,
             target_role=target_role,
             status=TicketStatus.OPEN.value,

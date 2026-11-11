@@ -19,6 +19,7 @@ class Punishment(Base):
 
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     target_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     issuer_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     issuer_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

@@ -73,11 +73,13 @@ class LawService:
         punishment_type: PunishmentType | str,
         law_article: Optional[str],
         duration_seconds: Optional[int],
-        reason: str
+        reason: str,
+        chat_id: Optional[int] = None,
     ) -> Punishment:
         punishment = Punishment(
             user_id=target_user.id,
             target_telegram_id=target_user.telegram_id,
+            chat_id=chat_id,
             issuer_id=issuer_user.id,
             issuer_telegram_id=issuer_user.telegram_id,
             punishment_type=punishment_type.value if hasattr(punishment_type, "value") else str(punishment_type),

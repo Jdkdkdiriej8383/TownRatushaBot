@@ -71,12 +71,18 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
 
     appeal_text = parts[1].strip()
 
-    # Создаем обращение категории COURT
+    # 1. Определяем чат и топик суда
+    target_chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
+    if not target_chat_id or target_chat_id > 0:
+        target_chat_id = await TopicService.get_primary_group_chat_id(session)
+
+    # 2. Создаем обращение категории COURT с привязкой к целевому чату
     ticket = await TicketService.create_ticket(
         session=session,
         creator=db_user,
         category=TicketCategory.COURT.value,
         initial_text=appeal_text,
+        chat_id=target_chat_id,
     )
     ticket.target_role = "Конституционный Суд / Суд"
     await session.commit()
@@ -96,7 +102,7 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
 
     keyboard = get_appeal_inline_keyboard(ticket.id)
 
-    # 1. Отвечаем заявителю подтверждением о принятии иска
+    # 3. Отвечаем заявителю подтверждением о принятии иска
     applicant_reply = (
         f"⚖️ <b>СУДЕБНАЯ АПЕЛЛЯЦИЯ #{ticket.id} ЗАРЕГИСТРИРОВАНА!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -107,12 +113,6 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
     )
     await message.answer(applicant_reply)
 
-    # 2. Определяем чат и топик суда
-    target_chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
-    if not target_chat_id or target_chat_id > 0:
-        known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-        if known:
-            target_chat_id = known
     court_thread_id = None
     if target_chat_id:
         court_thread_id = await TopicService.get_topic_thread_id(
@@ -194,6 +194,14 @@ async def cmd_verdict(message: Message, session: AsyncSession, db_user: User):
         await message.reply("❌ Заявитель не найден в базе данных!")
         return
 
+    target_chat_id = (
+        (message.chat.id if message.chat.type in ("group", "supergroup") else None)
+        or ticket.chat_id
+        or settings.MAIN_CHAT_ID
+    )
+    if not target_chat_id or target_chat_id > 0:
+        target_chat_id = await TopicService.get_primary_group_chat_id(session)
+
     outcome_text = ""
     if action in ["оправдать", "pardon", "амнистия"]:
         # Снимаем бан и все варны
@@ -201,27 +209,43 @@ async def cmd_verdict(message: Message, session: AsyncSession, db_user: User):
             await ModerationService.apply_unban(
                 session=session,
                 bot=message.bot,
-                chat_id=message.chat.id,
+                chat_id=target_chat_id,
                 issuer=db_user,
                 target=target_user,
                 reason=f"Судебное оправдание по делу #{appeal_id}: {reason}",
             )
+        try:
+            await ModerationService.apply_unmute(
+                session=session,
+                bot=message.bot,
+                chat_id=target_chat_id,
+                issuer=db_user,
+                target=target_user,
+                reason=f"Судебное оправдание по делу #{appeal_id}: {reason}",
+            )
+        except Exception as e:
+            logger.warning("Не удалось снять мут при оправдательном вердикте: %s", e)
+
         target_user.warns_count = 0
         await session.commit()
-        outcome_text = "🕊️ <b>ПОЛНОЕ ОПРАВДАНИЕ:</b> Все предупреждения аннулированы, бан снят."
+        outcome_text = "🕊️ <b>ПОЛНОЕ ОПРАВДАНИЕ:</b> Все предупреждения, мут и ограничения сняты."
 
     elif action in ["смягчить", "mitigate"]:
         # Снимаем 1 варн или размучиваем
         if target_user.warns_count and target_user.warns_count > 0:
             target_user.warns_count -= 1
-        await ModerationService.apply_unmute(
-            session=session,
-            bot=message.bot,
-            chat_id=message.chat.id,
-            issuer=db_user,
-            target=target_user,
-            reason=f"Судебное смягчение по делу #{appeal_id}: {reason}",
-        )
+        try:
+            await ModerationService.apply_unmute(
+                session=session,
+                bot=message.bot,
+                chat_id=target_chat_id,
+                issuer=db_user,
+                target=target_user,
+                reason=f"Судебное смягчение по делу #{appeal_id}: {reason}",
+            )
+        except Exception as e:
+            logger.warning("Не удалось снять мут при смягчении наказания: %s", e)
+
         await session.commit()
         outcome_text = f"📉 <b>СМЯГЧЕНИЕ НАКАЗАНИЯ:</b> Снято 1 предупреждение (осталось {target_user.warns_count}/5), мут снят."
 
@@ -266,13 +290,23 @@ async def cmd_verdict(message: Message, session: AsyncSession, db_user: User):
 @router.callback_query(F.data.startswith("court_verdict:"))
 async def cb_court_verdict(callback: CallbackQuery, session: AsyncSession, db_user: User):
     """Вынесение вердикта судьей по инлайн-кнопкам под карточкой апелляции."""
-    target_chat_id = callback.message.chat.id if callback.message and callback.message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
+    parts = callback.data.split(":")
+    appeal_id = int(parts[1])
+    action = parts[2]
+
+    ticket = await TicketService.get_ticket(session, appeal_id)
+    if not ticket or ticket.status == TicketStatus.CLOSED.value:
+        await callback.answer("Дело уже рассмотрено или не найдено!", show_alert=True)
+        return
+
+    # Целевой супергрупповой чат берется из тикета, либо из текущего сообщения, либо из базы
+    target_chat_id = (
+        (callback.message.chat.id if callback.message and callback.message.chat.type in ("group", "supergroup") else None)
+        or ticket.chat_id
+        or settings.MAIN_CHAT_ID
+    )
     if not target_chat_id or target_chat_id > 0:
-        known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-        if known:
-            target_chat_id = known
-        elif callback.message:
-            target_chat_id = callback.message.chat.id
+        target_chat_id = await TopicService.get_primary_group_chat_id(session)
 
     is_judge = False
     if (
@@ -300,31 +334,27 @@ async def cb_court_verdict(callback: CallbackQuery, session: AsyncSession, db_us
         await callback.answer("🚫 Выносить вердикты могут только судьи и администрация (Ранг 3+)!", show_alert=True)
         return
 
-    parts = callback.data.split(":")
-    appeal_id = int(parts[1])
-    action = parts[2]
-
-    ticket = await TicketService.get_ticket(session, appeal_id)
-    if not ticket or ticket.status == TicketStatus.CLOSED.value:
-        await callback.answer("Дело уже рассмотрено или не найдено!", show_alert=True)
-        return
-
     target_user = await session.scalar(select(User).where(User.id == ticket.creator_id))
     if not target_user:
         await callback.answer("Заявитель не найден в базе данных!", show_alert=True)
         return
 
     outcome_text = ""
+    unmute_warn = ""
     if action == "pardon":
         if target_user.is_enemy:
-            await ModerationService.apply_unban(
-                session=session,
-                bot=callback.bot,
-                chat_id=target_chat_id,
-                issuer=db_user,
-                target=target_user,
-                reason=f"Судебное оправдание по делу #{appeal_id}",
-            )
+            try:
+                await ModerationService.apply_unban(
+                    session=session,
+                    bot=callback.bot,
+                    chat_id=target_chat_id,
+                    issuer=db_user,
+                    target=target_user,
+                    reason=f"Судебное оправдание по делу #{appeal_id}",
+                )
+            except Exception as e:
+                logger.warning("Не удалось снять бан по апелляции: %s", e)
+
         try:
             await ModerationService.apply_unmute(
                 session=session,
@@ -335,11 +365,15 @@ async def cb_court_verdict(callback: CallbackQuery, session: AsyncSession, db_us
                 reason=f"Судебное оправдание по делу #{appeal_id}",
             )
         except Exception as e:
-            logger.debug("Снятие мута при оправдании: %s", e)
+            logger.warning("Снятие мута при судебном оправдании не удалось: %s", e)
+            unmute_warn = f" (⚠️ ограничение в TG: {e})"
 
         target_user.warns_count = 0
         await session.commit()
-        outcome_text = "🕊️ Оправдан. Наказания, мут и варны аннулированы."
+        if unmute_warn:
+            outcome_text = f"🕊️ Оправдан. Наказания аннулированы{unmute_warn}."
+        else:
+            outcome_text = "🕊️ Оправдан. Наказания, мут и варны аннулированы."
 
     elif action == "mitigate":
         if target_user.warns_count and target_user.warns_count > 0:
@@ -354,9 +388,14 @@ async def cb_court_verdict(callback: CallbackQuery, session: AsyncSession, db_us
                 reason=f"Судебное смягчение по делу #{appeal_id}",
             )
         except Exception as e:
-            logger.debug("Снятие мута при смягчении: %s", e)
+            logger.warning("Снятие мута при судебном смягчении не удалось: %s", e)
+            unmute_warn = f" (⚠️ ограничение в TG: {e})"
+
         await session.commit()
-        outcome_text = f"📉 Наказание смягчено. Варны: {target_user.warns_count}/5, мут снят."
+        if unmute_warn:
+            outcome_text = f"📉 Наказание смягчено. Варны: {target_user.warns_count}/5{unmute_warn}."
+        else:
+            outcome_text = f"📉 Наказание смягчено. Варны: {target_user.warns_count}/5, мут снят."
 
     elif action == "reject":
         outcome_text = "🔨 Апелляция отклонена. Наказание оставлено в силе."

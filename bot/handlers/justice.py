@@ -11,6 +11,7 @@ from core.enums import PositionLevel, PunishmentType, FineStatus
 from core.regulators import RegulatorService, format_duration
 from core.laws_service import LawService
 from core.fine_service import FineService
+from core.topic_service import TopicService
 from core.exceptions import TownBaseException, UserNotFoundError
 from bot.utils import extract_target_user
 from config import settings
@@ -148,6 +149,7 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
             law_article=law_article_str,
             duration_seconds=duration_sec,
             reason=reason,
+            chat_id=message.chat.id if message.chat.type in ("group", "supergroup") else None,
         )
 
         target_user.warns_count += 1
@@ -407,9 +409,7 @@ async def cmd_amnesty(message: Message, session: AsyncSession, db_user: User):
 
     target_chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
     if not target_chat_id or target_chat_id > 0:
-        known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-        if known:
-            target_chat_id = known
+        target_chat_id = await TopicService.get_primary_group_chat_id(session)
 
     # 1. Режим общегородской амнистии (/амнистия все / /амнистия all)
     if raw_args and raw_args[0].lower() in ("все", "all", "всё"):

@@ -125,9 +125,7 @@ async def cmd_report_settings(message: Message, session: AsyncSession, db_user: 
     if message.chat.type == "private":
         target_chat_id = settings.MAIN_CHAT_ID or message.chat.id
         if not target_chat_id or target_chat_id > 0:
-            known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-            if known:
-                target_chat_id = known
+            target_chat_id = await TopicService.get_primary_group_chat_id(session) or message.chat.id
 
     is_admin = False
     if (
@@ -173,11 +171,7 @@ async def cmd_report_settings(message: Message, session: AsyncSession, db_user: 
 async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_user: User):
     target_chat_id = callback.message.chat.id if callback.message and callback.message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
     if not target_chat_id or target_chat_id > 0:
-        known = await session.scalar(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0).limit(1))
-        if known:
-            target_chat_id = known
-        elif callback.message:
-            target_chat_id = callback.message.chat.id
+        target_chat_id = await TopicService.get_primary_group_chat_id(session) or (callback.message.chat.id if callback.message else 0)
 
     is_admin = False
     if (
