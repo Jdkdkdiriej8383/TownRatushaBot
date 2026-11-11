@@ -31,7 +31,7 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
     - Временные муты: /наказать 1h спам, /наказать @user 30m флуд
     - Причины: /наказать @user спам в чате
     """
-    from core.moderation_service import parse_duration
+    from core.moderation_service import parse_duration, ModerationService
 
     raw_args = (message.text or "").split()[1:]
     target_user, remaining_args = await extract_target_user(message, session, raw_args)
@@ -42,34 +42,139 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
             "• <b>Ответом:</b> ответьте на сообщение нарушителя: <code>/наказать [статья|срок] [причина]</code>\n"
             "• <b>По тегу:</b> <code>/наказать @username [статья|срок] [причина]</code>\n\n"
             "<b>Примеры:</b>\n"
-            "• <code>/наказать 2.1</code> — по статье 2.1 Свода Законов\n"
+            "• <code>/наказать 2.9</code> — по статье 2.9 (оффтоп/флуд, мут 1ч)\n"
             "• <code>/наказать 1h спам</code> — ограничение речи на 1 час\n"
+            "• <code>/наказать @user варн флуд</code> — предупреждение\n"
             "• <code>/наказать @user 24ч оскорбления</code>\n"
-            "• <code>/наказать 1.4</code> — изгнание (бан) по ст. 1.4"
+            "• <code>/наказать 3.10</code> — изгнание за госизмену"
         )
+        return
+
+    first_token_raw = remaining_args[0].strip().lower() if remaining_args else ""
+    first_token = first_token_raw.lstrip("№")
+
+    # Быстрые действия по ключевым словам: варн, бан, кик
+    if first_token in ("варн", "warn", "предупреждение"):
+        reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else "Нарушение регламента"
+        try:
+            warns, auto_muted, auto_banned, extra, punishment = await ModerationService.apply_warn(
+                session=session,
+                bot=message.bot,
+                chat_id=message.chat.id,
+                issuer=db_user,
+                target=target_user,
+                reason=reason,
+            )
+            reply_text = (
+                f"⚠️ <b>ВЫНЕСЕНО ПРЕДУПРЕЖДЕНИЕ ({warns}/5)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Нарушитель:</b> @{target_user.username or '—'} (<code>{target_user.telegram_id}</code>)\n"
+                f"• <b>Блюститель:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+                f"• <b>Причина:</b> <i>{reason}</i>{extra}"
+            )
+            await message.answer(reply_text)
+            await ModerationService.send_audit_log(
+                bot=message.bot,
+                session=session,
+                chat_id=message.chat.id,
+                target=target_user,
+                issuer=db_user,
+                action_title=f"ВАРН ({warns}/5)",
+                reason=reason,
+                punishment_id=punishment.id,
+            )
+        except TownBaseException as e:
+            await message.answer(f"❌ {e.message}")
+        return
+
+    if first_token in ("бан", "ban", "изгнание"):
+        reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else "Изгнание из города"
+        try:
+            punishment = await ModerationService.apply_ban(
+                session=session,
+                bot=message.bot,
+                chat_id=message.chat.id,
+                issuer=db_user,
+                target=target_user,
+                reason=reason,
+            )
+            reply_text = (
+                f"🔨 <b>ИЗГНАНИЕ ИЗ ГОРОДА (БАН)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Изгнанный:</b> @{target_user.username or '—'} (<code>{target_user.telegram_id}</code>)\n"
+                f"• <b>Постановил:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+                f"• <b>Причина:</b> <i>{reason}</i>\n"
+                f"⚖️ <i>Право на судебную апелляцию: /appeal в Зале Суда.</i>"
+            )
+            await message.answer(reply_text)
+            await ModerationService.send_audit_log(
+                bot=message.bot,
+                session=session,
+                chat_id=message.chat.id,
+                target=target_user,
+                issuer=db_user,
+                action_title="БАН (ИЗГНАНИЕ)",
+                reason=reason,
+                punishment_id=punishment.id,
+            )
+        except TownBaseException as e:
+            await message.answer(f"❌ {e.message}")
+        return
+
+    if first_token in ("кик", "kick"):
+        reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else "Исключение из чата"
+        try:
+            punishment = await ModerationService.apply_kick(
+                session=session,
+                bot=message.bot,
+                chat_id=message.chat.id,
+                issuer=db_user,
+                target=target_user,
+                reason=reason,
+            )
+            reply_text = (
+                f"🚪 <b>ИСКЛЮЧЕНИЕ ИЗ ЧАТА (КИК)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Исключен:</b> @{target_user.username or '—'} (<code>{target_user.telegram_id}</code>)\n"
+                f"• <b>Модератор:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+                f"• <b>Причина:</b> <i>{reason}</i>"
+            )
+            await message.answer(reply_text)
+            await ModerationService.send_audit_log(
+                bot=message.bot,
+                session=session,
+                chat_id=message.chat.id,
+                target=target_user,
+                issuer=db_user,
+                action_title="КИК",
+                reason=reason,
+                punishment_id=punishment.id,
+            )
+        except TownBaseException as e:
+            await message.answer(f"❌ {e.message}")
         return
 
     # Разбираем статью / срок / причину
     law = None
     mute_sec = 3600
     is_ban = False
+    is_warn = False
     custom_reason = None
     sanction_descr = ""
-    law_article_str = "2.1"
-    law_title_str = "Нарушение регламента чата"
+    law_article_str = "2.9"
+    law_title_str = "Оффтоп и нарушение регламента чата"
 
     if not remaining_args:
-        # Без аргументов ответом: применяем дефолтную ст. 2.1 (1 час мута)
+        # Без аргументов ответом: применяем дефолтную ст. 2.9 (1 час мута за нарушение порядка в чате)
         try:
-            law = await LawService.get_law(session, "2.1")
+            law = await LawService.get_law(session, "2.9")
             mute_sec = law.default_mute_seconds or 3600
             law_article_str = law.article_number
             law_title_str = law.title
-            custom_reason = f"Нарушение ст. {law.article_number}: {law.title}"
+            custom_reason = "Нарушение регламента порядка в чате"
         except Exception:
             custom_reason = "Нарушение порядка чата"
     else:
-        first_token = remaining_args[0].strip().lstrip("№")
         # 1. Проверяем, является ли первый токен статьей закона
         try:
             law = await LawService.get_law(session, first_token)
@@ -78,12 +183,16 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
             custom_reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else f"Нарушение ст. {law.article_number}: {law.title}"
             if law.is_ban_applicable and (law.default_mute_seconds is None or law.default_mute_seconds == 0):
                 is_ban = True
+            elif law.default_mute_seconds:
+                mute_sec = law.default_mute_seconds
+            elif "предупреждение" in (law.sanction_text or "").lower():
+                is_warn = True
             else:
-                mute_sec = law.default_mute_seconds or 3600
+                mute_sec = 3600
         except Exception:
             # 2. Не статья — проверяем, является ли сроком (1h, 30m, 1d, 2ч и т.д.)
             parsed_sec = parse_duration(first_token)
-            if parsed_sec > 0:
+            if parsed_sec and parsed_sec > 0:
                 mute_sec = parsed_sec
                 custom_reason = " ".join(remaining_args[1:]).strip() if len(remaining_args) > 1 else "Нарушение регламента чата"
             else:
@@ -92,6 +201,36 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
                 mute_sec = 3600
 
     try:
+        if is_warn:
+            warns, auto_muted, auto_banned, extra, punishment = await ModerationService.apply_warn(
+                session=session,
+                bot=message.bot,
+                chat_id=message.chat.id,
+                issuer=db_user,
+                target=target_user,
+                reason=custom_reason or f"Нарушение ст. {law_article_str}",
+            )
+            reply_text = (
+                f"⚠️ <b>ВЫНЕСЕНО ПРЕДУПРЕЖДЕНИЕ ({warns}/5)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Нарушитель:</b> @{target_user.username or '—'} (<code>{target_user.telegram_id}</code>)\n"
+                f"• <b>Основание:</b> ст. {law_article_str} — {law_title_str}\n"
+                f"• <b>Блюститель:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+                f"• <b>Причина:</b> <i>{custom_reason}</i>{extra}"
+            )
+            await message.answer(reply_text)
+            await ModerationService.send_audit_log(
+                bot=message.bot,
+                session=session,
+                chat_id=message.chat.id,
+                target=target_user,
+                issuer=db_user,
+                action_title=f"ВАРН ({warns}/5): ст. {law_article_str}",
+                reason=custom_reason,
+                punishment_id=punishment.id,
+            )
+            return
+
         if is_ban:
             regulator = await RegulatorService.validate_ban(
                 session=session,
@@ -105,13 +244,16 @@ async def cmd_punish(message: Message, session: AsyncSession, db_user: User):
             except Exception as e:
                 logger.warning("Не удалось забанить в Telegram: %s", e)
 
-            if law and law.article_number == "1.4":
+            # Статус «Враг города» присваивается строго по ст. 3.10 (госизмена), 2.3 (угрозы/шантаж), 3.28
+            if law and law.article_number in ("3.10", "2.3", "3.28"):
                 target_user.is_enemy = True
                 target_user.enemy_reason = custom_reason
 
             punishment_type = PunishmentType.BAN
             duration_sec = regulator.max_ban_time
             sanction_descr = "Изгнание из города (Бан)"
+            if target_user.is_enemy:
+                sanction_descr += " + статус «Враг города»"
 
         else:
             regulator = await RegulatorService.validate_mute(

@@ -119,11 +119,12 @@ class ChatRegulatorMiddleware(BaseMiddleware):
             if len(tracker) > chat_settings.media_spam_threshold:
                 await safe_delete()
                 await safe_mute(chat_settings.auto_mute_seconds)
+                dur_str = f"{chat_settings.auto_mute_seconds // 60} мин." if chat_settings.auto_mute_seconds < 3600 else f"{chat_settings.auto_mute_seconds // 3600} ч."
                 try:
                     await event.answer(
                         f"🛑 <b>Регулятор медиа-спама!</b>\n"
-                        f"{mention} временно ограничен в речи на 30 мин "
-                        f"за отправку более {chat_settings.media_spam_threshold} медиа подряд (Статья 2.3)."
+                        f"{mention} временно ограничен в речи на {dur_str} "
+                        f"за отправку более {chat_settings.media_spam_threshold} медиа подряд (Статья 2.4 Свода Законов)."
                     )
                 except Exception:
                     pass
@@ -154,7 +155,7 @@ class ChatRegulatorMiddleware(BaseMiddleware):
                     try:
                         await event.answer(
                             f"⚠️ <b>Регулятор капса:</b> {mention}, "
-                            f"не кричите в чате! Сообщение удалено по Статье 2.2 Свода Законов."
+                            f"не кричите в чате! Сообщение удалено по Статье 2.5 Свода Законов."
                         )
                     except Exception:
                         pass
@@ -190,7 +191,7 @@ class ChatRegulatorMiddleware(BaseMiddleware):
                 try:
                     await event.answer(
                         f"🚫 <b>Регулятор рекламы:</b> {mention}, "
-                        f"публикация сторонних ссылок запрещена (Статья 2.4 Свода Законов)."
+                        f"публикация сторонних ссылок запрещена (Статья 2.10 Свода Законов)."
                     )
                 except Exception:
                     pass

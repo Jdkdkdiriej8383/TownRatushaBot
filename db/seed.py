@@ -673,10 +673,43 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                 else:
                     await conn.run_sync(Base.metadata.create_all)
                     if is_pg:
-                        await conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS reprimands_count INTEGER DEFAULT 0'))
-                        await conn.execute(text("ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_destination VARCHAR(32) DEFAULT 'both'"))
-                        await conn.execute(text("ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_anonymous BOOLEAN DEFAULT FALSE"))
-                        await conn.execute(text("ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_topic_id BIGINT"))
+                        pg_migrations = [
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS reprimands_count INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_title VARCHAR(64)",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS closed_tickets_count INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS false_reports_count INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS reports_blocked_until TIMESTAMP WITH TIME ZONE",
+                            "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_destination VARCHAR(32) DEFAULT 'both'",
+                            "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_anonymous BOOLEAN DEFAULT FALSE",
+                            "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS reports_topic_id BIGINT",
+                            "ALTER TABLE reports ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+                            "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+                            "ALTER TABLE punishments ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+                        ]
+                        for migration_sql in pg_migrations:
+                            try:
+                                await conn.execute(text(migration_sql))
+                            except Exception as m_err:
+                                logger.warning(f"Ошибка применения миграции '{migration_sql}': {m_err}")
+                    else:
+                        sqlite_migrations = [
+                            "ALTER TABLE users ADD COLUMN reprimands_count INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN custom_title VARCHAR(64)",
+                            "ALTER TABLE users ADD COLUMN closed_tickets_count INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN false_reports_count INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN reports_blocked_until TIMESTAMP",
+                            "ALTER TABLE chat_settings ADD COLUMN reports_destination VARCHAR(32) DEFAULT 'both'",
+                            "ALTER TABLE chat_settings ADD COLUMN reports_anonymous BOOLEAN DEFAULT 0",
+                            "ALTER TABLE chat_settings ADD COLUMN reports_topic_id BIGINT",
+                            "ALTER TABLE reports ADD COLUMN chat_id BIGINT",
+                            "ALTER TABLE tickets ADD COLUMN chat_id BIGINT",
+                            "ALTER TABLE punishments ADD COLUMN chat_id BIGINT",
+                        ]
+                        for migration_sql in sqlite_migrations:
+                            try:
+                                await conn.execute(text(migration_sql))
+                            except Exception:
+                                pass
             break
         except Exception as e:
             if attempt == max_retries:
