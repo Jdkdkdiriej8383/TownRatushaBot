@@ -2,11 +2,12 @@ import logging
 from typing import Optional
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
-from core.enums import PositionLevel, GovernmentRole, ROLE_ALIASES, TopicType
+from core.enums import PositionLevel, GovernmentRole, ROLE_ALIASES, resolve_role_alias, TopicType
 from core.hierarchy_service import HierarchyService
 from core.topic_service import TopicService, TOPIC_TYPE_TITLES
 from core.moderation_service import ModerationService
@@ -17,51 +18,138 @@ from bot.filters.topic import TopicCommandFilter
 logger = logging.getLogger("townbot.admin")
 router = Router(name="admin_router")
 
+SETROLE_DEFINITIONS: list[tuple[str, str, int, str]] = [
+    # (label, code, role_level, title)
+    ("👑 Мэр (Ранг 4)", "mayor", PositionLevel.SENIOR_ADMINISTRATION.value, GovernmentRole.MAYOR.value),
+    ("🏛️ Премьер (Ранг 4)", "pm", PositionLevel.SENIOR_ADMINISTRATION.value, GovernmentRole.PRIME_MINISTER.value),
+    ("⚖️ Конст. судья (Ранг 4)", "cjudge", PositionLevel.SENIOR_ADMINISTRATION.value, GovernmentRole.CHIEF_JUSTICE.value),
+    ("🏛️ Зам. мэра (Ранг 3)", "deputy", PositionLevel.ADMINISTRATION.value, GovernmentRole.DEPUTY_MAYOR.value),
+    ("💼 Министр (Ранг 3)", "min", PositionLevel.ADMINISTRATION.value, GovernmentRole.MINISTER.value),
+    ("⚖️ Судья (Ранг 3)", "judge", PositionLevel.ADMINISTRATION.value, GovernmentRole.JUDGE.value),
+    ("🛡️ Блюститель (Ранг 2)", "warden", PositionLevel.CHAT_WARDEN.value, GovernmentRole.WARDEN.value),
+    ("🔰 Помощник (Ранг 1)", "help", PositionLevel.ASSISTANT.value, GovernmentRole.ASSISTANT.value),
+    ("👤 Снять в Граждане (Ранг 0)", "cit", PositionLevel.CITIZEN.value, GovernmentRole.CITIZEN.value),
+]
 
-@router.message(Command("setrole", "роль", "должность"), TopicCommandFilter(["admin"]))
+ROLE_CODE_MAP: dict[str, tuple[int, str]] = {
+    code: (level, title) for _, code, level, title in SETROLE_DEFINITIONS
+}
+
+
+def build_role_keyboard(initiator: User, target: User) -> InlineKeyboardMarkup:
+    """Генерирует инлайн-клавиатуру только с теми должностями, которые инициатор имеет право назначить."""
+    builder = InlineKeyboardBuilder()
+
+    for label, code, level, title in SETROLE_DEFINITIONS:
+        can_appoint, _ = HierarchyService.can_appoint_role(
+            initiator=initiator,
+            target=target,
+            target_level=level,
+            target_title=title,
+        )
+        if can_appoint:
+            builder.button(
+                text=label,
+                callback_data=f"setrole:{target.telegram_id}:{code}"
+            )
+
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"setrole:{target.telegram_id}:cancel"))
+    return builder.as_markup()
+
+
+@router.message(Command("setrole", "set_role", "роль", "должность", "назначить", "дать_роль", "role"))
+@router.message(F.text.regexp(r"^!(?:setrole|set_role|роль|должность|назначить|дать_роль|role)(?:\s|$)"))
 async def cmd_setrole(message: Message, session: AsyncSession, db_user: User):
     """
-    Назначение государственной должности: /setrole <reply|id|@user> <должность>
+    Назначение государственной должности: /setrole <reply|id|@user> [должность]
+    Если должность не указана, открывает интерактивные кнопки для назначения в 1 клик.
     Строго соблюдается субординация: Ранг_Инициатора > Целевой_Ранг.
     """
+    # Проверка базовых административных полномочий инициатора
+    is_admin = (
+        HierarchyService.is_owner(db_user)
+        or db_user.government_rank >= 3
+        or db_user.custom_title == GovernmentRole.DEPUTY_MAYOR.value
+    )
+    if not is_admin:
+        await message.reply("🚫 <b>Отказано:</b> Назначать на государственные должности разрешено только Администрации (Ранг 3+)!")
+        return
+
     raw_args = (message.text or "").split()[1:]
     target_user, remaining_args = await extract_target_user(message, session, raw_args)
 
     if not target_user:
-        await message.reply(
-            "⚠️ Использование: <code>/setrole @username &lt;должность&gt;</code>\n"
-            "или ответом на сообщение: <code>/setrole &lt;должность&gt;</code>\n\n"
-            "<b>Доступные должности:</b> Мэр, Премьер-министр, Конституционный судья, "
-            "Заместитель мэра, Министр, Судья, Блюститель, Помощник, Гражданин."
-        )
-        return
-
-    if not remaining_args:
-        await message.reply(
-            "⚠️ Укажите желаемую должность! Пример: <code>/setrole @username Министр</code>\n"
-            "Доступные: Мэр, Премьер, Судья, Министр, Блюститель, Помощник, Гражданин."
-        )
-        return
-
-    role_input = " ".join(remaining_args).strip().lower()
-    role_info = ROLE_ALIASES.get(role_input)
-
-    if not role_info:
-        # Попробуем частичный поиск
-        matched = None
-        for alias, info in ROLE_ALIASES.items():
-            if alias in role_input or role_input in alias:
-                matched = info
-                break
-        if matched:
-            role_info = matched
-        else:
+        if raw_args and raw_args[0].startswith("@"):
             await message.reply(
-                f"❌ Неизвестная должность «{role_input}»!\n"
-                f"Допустимо: <i>Мэр, Премьер-министр, Конституционный судья, Заместитель мэра, "
-                f"Министр, Судья, Блюститель, Помощник, Гражданин</i>."
+                f"❌ Пользователь <b>{raw_args[0]}</b> не найден в базе данных бота.\n\n"
+                "💡 <b>Как назначить:</b>\n"
+                "1. Ответьте на любое сообщение кандидата командой <code>/роль</code>\n"
+                "2. Или укажите числовой Telegram ID: <code>/setrole 123456789 [должность]</code>\n"
+                "3. Или попросите кандидата написать сообщение в чат бота."
             )
             return
+
+        await message.reply(
+            "👑 <b>ГОСУДАРСТВЕННЫЕ НАЗНАЧЕНИЯ</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <b>Самый удобный способ:</b>\n"
+            "• Ответьте командой <code>/роль</code> на сообщение кандидата — бот откроет интерактивные кнопки!\n\n"
+            "📝 <b>Текстовые форматы:</b>\n"
+            "• <code>/setrole @username [должность]</code>\n"
+            "• <code>/setrole [ID] [должность]</code>\n"
+            "• <code>/роль [должность]</code> <i>(ответом на сообщение)</i>\n\n"
+            "🎖️ <b>Ранги и должности:</b>\n"
+            "• <b>Ранг 4:</b> Мэр, Премьер-министр, Конст. судья (или <code>4</code>)\n"
+            "• <b>Ранг 3:</b> Заместитель мэра, Министр, Судья (или <code>3</code>)\n"
+            "• <b>Ранг 2:</b> Блюститель (или <code>модер</code>, <code>2</code>)\n"
+            "• <b>Ранг 1:</b> Помощник (или <code>хелпер</code>, <code>1</code>)\n"
+            "• <b>Ранг 0:</b> Гражданин (или <code>снять</code>, <code>0</code>)"
+        )
+        return
+
+    # Субординация по текущему рангу кандидата
+    if not HierarchyService.is_owner(db_user) and db_user.government_rank <= target_user.government_rank:
+        await message.reply(
+            f"🚫 <b>Нарушение субординации!</b>\n"
+            f"Вы ({db_user.position_title}, Ранг {db_user.government_rank}) не можете изменять должность "
+            f"равного или старшего сотрудника (@{target_user.username or target_user.full_name}, {target_user.position_title})."
+        )
+        return
+
+    # Если должность не указана текстом — показываем интерактивную клавиатуру
+    if not remaining_args:
+        kb = build_role_keyboard(initiator=db_user, target=target_user)
+        uname = f"@{target_user.username}" if target_user.username else target_user.full_name
+        current_title = target_user.custom_title or target_user.position_title
+        await message.reply(
+            f"👑 <b>ГОСУДАРСТВЕННОЕ НАЗНАЧЕНИЕ</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Кандидат:</b> {uname} (ID: <code>{target_user.telegram_id}</code>)\n"
+            f"• <b>Текущий статус:</b> {current_title} (Ранг {target_user.government_rank})\n"
+            f"• <b>Инициатор:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Выберите новую государственную должность одним нажатием:</i>",
+            reply_markup=kb,
+        )
+        return
+
+    # Если должность передана текстом — парсим и применяем
+    role_input = " ".join(remaining_args).strip().lower()
+    role_info = resolve_role_alias(role_input)
+
+    if not role_info:
+        await message.reply(
+            f"❌ Неизвестная должность «{role_input}»!\n\n"
+            f"💡 <b>Доступные варианты:</b>\n"
+            f"• <b>Ранг 4:</b> Мэр, Премьер, Конст. судья (или <code>4</code>)\n"
+            f"• <b>Ранг 3:</b> Зам. мэра, Министр, Судья (или <code>3</code>)\n"
+            f"• <b>Ранг 2:</b> Блюститель (или <code>модер</code>, <code>2</code>)\n"
+            f"• <b>Ранг 1:</b> Помощник (или <code>хелпер</code>, <code>1</code>)\n"
+            f"• <b>Ранг 0:</b> Гражданин (или <code>0</code>, <code>снять</code>)\n\n"
+            f"<i>Совет: отправьте <code>/роль</code> без текста, чтобы выбрать кнопкой.</i>"
+        )
+        return
 
     target_level, target_title = role_info
 
@@ -78,7 +166,7 @@ async def cmd_setrole(message: Message, session: AsyncSession, db_user: User):
 
     # Применяем новую должность
     target_user.role_level = target_level
-    target_user.custom_title = target_title
+    target_user.custom_title = target_title if target_level > 0 else None
     target_user.is_enemy = False  # Снимаем статус врага, если назначается должность
     await session.commit()
     await session.refresh(target_user)
@@ -104,17 +192,117 @@ async def cmd_setrole(message: Message, session: AsyncSession, db_user: User):
         reason="Государственное распоряжение",
     )
 
+    try:
+        await message.bot.send_message(
+            chat_id=target_user.telegram_id,
+            text=(
+                f"👑 <b>Вам присвоена государственная должность!</b>\n\n"
+                f"🎖️ Должность: <b>{target_title}</b> (Ранг {target_user.government_rank})\n"
+                f"🏛️ Приказ подписал: @{db_user.username or db_user.full_name} ({db_user.position_title})"
+            )
+        )
+    except Exception:
+        pass
 
-@router.message(Command("demote", "разжаловать", "снять"), TopicCommandFilter(["admin"]))
+
+@router.callback_query(F.data.startswith("setrole:"))
+async def cb_setrole_select(callback: CallbackQuery, session: AsyncSession, db_user: User):
+    """Обработка выбора должности через интерактивную инлайн-клавиатуру."""
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Ошибка формата данных", show_alert=True)
+        return
+
+    target_id = int(parts[1])
+    role_code = parts[2]
+
+    if role_code == "cancel":
+        await callback.message.edit_text("❌ Назначение должности отменено.", reply_markup=None)
+        await callback.answer("Отменено")
+        return
+
+    if role_code not in ROLE_CODE_MAP:
+        await callback.answer("❌ Неизвестная должность", show_alert=True)
+        return
+
+    target_level, target_title = ROLE_CODE_MAP[role_code]
+
+    target_user = await session.scalar(select(User).where(User.telegram_id == target_id))
+    if not target_user:
+        await callback.answer("❌ Кандидат не найден в базе данных", show_alert=True)
+        return
+
+    can_appoint, reason = HierarchyService.can_appoint_role(
+        initiator=db_user,
+        target=target_user,
+        target_level=target_level,
+        target_title=target_title,
+    )
+    if not can_appoint:
+        await callback.answer(f"🚫 {reason}", show_alert=True)
+        return
+
+    # Применяем новую должность
+    target_user.role_level = target_level
+    target_user.custom_title = target_title if target_level > 0 else None
+    target_user.is_enemy = False
+    await session.commit()
+    await session.refresh(target_user)
+
+    reply_text = (
+        f"👑 <b>ГОСУДАРСТВЕННОЕ НАЗНАЧЕНИЕ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Гражданин:</b> @{target_user.username or '—'} (<code>{target_user.telegram_id}</code>)\n"
+        f"• <b>Новая должность:</b> 🎖️ <b>{target_title}</b> (Ранг {target_user.government_rank})\n"
+        f"• <b>Назначил:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📜 <i>Указ о назначении вступил в законную силу.</i>"
+    )
+    await callback.message.edit_text(reply_text, reply_markup=None)
+    await callback.answer("✅ Должность успешно присвоена!")
+
+    await ModerationService.send_audit_log(
+        bot=callback.bot,
+        session=session,
+        chat_id=callback.message.chat.id,
+        target=target_user,
+        issuer=db_user,
+        action_title=f"НАЗНАЧЕНИЕ: {target_title}",
+        reason="Государственное распоряжение (через меню)",
+    )
+
+    try:
+        await callback.bot.send_message(
+            chat_id=target_user.telegram_id,
+            text=(
+                f"👑 <b>Вам присвоена государственная должность!</b>\n\n"
+                f"🎖️ Должность: <b>{target_title}</b> (Ранг {target_user.government_rank})\n"
+                f"🏛️ Приказ подписал: @{db_user.username or db_user.full_name} ({db_user.position_title})"
+            )
+        )
+    except Exception:
+        pass
+
+
+@router.message(Command("demote", "разжаловать", "снять", "снять_роль", "демот"))
+@router.message(F.text.regexp(r"^!(?:demote|разжаловать|снять|снять_роль|демот)(?:\s|$)"))
 async def cmd_demote(message: Message, session: AsyncSession, db_user: User):
-    """Разжалование сотрудника в рядового Гражданина: /demote <reply|id|@user>"""
+    """Разжалование сотрудника в рядового Гражданина: /demote <reply|id|@user> [причина]"""
     raw_args = (message.text or "").split()[1:]
     target_user, remaining_args = await extract_target_user(message, session, raw_args)
 
     if not target_user:
+        if raw_args and raw_args[0].startswith("@"):
+            await message.reply(
+                f"❌ Пользователь <b>{raw_args[0]}</b> не найден в базе данных.\n"
+                "💡 Ответьте командой <code>/demote</code> на сообщение сотрудника или укажите его Telegram ID."
+            )
+            return
+
         await message.reply(
-            "⚠️ Использование: <code>/demote @username [причина]</code>\n"
-            "или ответом на сообщение: <code>/demote [причина]</code>"
+            "⚠️ <b>Использование:</b> <code>/demote @username [причина]</code>\n"
+            "или ответом на сообщение: <code>/demote [причина]</code>\n"
+            "<i>Синонимы:</i> <code>/разжаловать</code>, <code>/снять</code>"
         )
         return
 
@@ -122,6 +310,10 @@ async def cmd_demote(message: Message, session: AsyncSession, db_user: User):
         HierarchyService.validate_seniority(initiator=db_user, target=target_user, action_name="разжалование")
     except TownBaseException as e:
         await message.reply(f"❌ {e.message}")
+        return
+
+    if target_user.government_rank == 0 and not target_user.custom_title:
+        await message.reply(f"ℹ️ @{target_user.username or target_user.full_name} уже является рядовым Гражданином.")
         return
 
     reason = " ".join(remaining_args).strip() if remaining_args else "Служебное несоответствие"
@@ -139,7 +331,9 @@ async def cmd_demote(message: Message, session: AsyncSession, db_user: User):
         f"• <b>Прежняя должность:</b> {prev_title}\n"
         f"• <b>Текущий статус:</b> 👤 <b>Гражданин</b> (Ранг 0)\n"
         f"• <b>Инициатор:</b> @{db_user.username or '—'} ({db_user.position_title})\n"
-        f"• <b>Причина:</b> <i>{reason}</i>"
+        f"• <b>Причина:</b> <i>{reason}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📜 <i>Сотрудник освобожден от занимаемой должности.</i>"
     )
     await message.answer(reply_text)
 
@@ -154,7 +348,8 @@ async def cmd_demote(message: Message, session: AsyncSession, db_user: User):
     )
 
 
-@router.message(Command("staff", "состав", "чиновники"), TopicCommandFilter(["admin", "community", "reports", "tickets", "court"]))
+@router.message(Command("staff", "состав", "чиновники"))
+@router.message(F.text.regexp(r"^!(?:staff|состав|чиновники)(?:\s|$)"))
 async def cmd_staff(message: Message, session: AsyncSession, db_user: User):
     """Список действующего государственного аппарата и модерации по рангам."""
     query = (

@@ -79,6 +79,10 @@ class HierarchyService:
         if initiator_rank <= target.government_rank:
             return False, f"Вы не можете изменять должность равного или старшего сотрудника ({target.position_title})!"
 
+        # Конституционный судья наделен абсолютной судебной неприкосновенностью
+        if target.custom_title == GovernmentRole.CHIEF_JUSTICE.value:
+            return False, "⚖️ <b>Конституционный судья</b> обладает абсолютной неприкосновенностью и не может быть смещен!"
+
         # Правила по конкретным высшим должностям
         initiator_title = initiator.custom_title or initiator.position_title
 
