@@ -1,11 +1,12 @@
 import logging
 import inspect
+from datetime import datetime, timezone
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
-from sqlalchemy import select
+from aiogram.types import Message, ChatMemberUpdated
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from db.models import User
+from db.models import User, ChatMember
 from core.enums import PositionLevel
 from config import settings
 from bot.commands import setup_bot_commands, BOT_COMMANDS
@@ -319,5 +320,234 @@ async def cmd_reset_database(message: Message, db_user: User):
         )
     except Exception as e:
         await status_msg.edit_text(f"❌ <b>Ошибка при сбросе базы данных:</b> {e}")
+
+
+@router.chat_member()
+async def on_chat_member_update(event: ChatMemberUpdated, session: AsyncSession):
+    """
+    Автоматический учет входа/выхода участников в группе (как в Ирисе):
+    Фиксирует любого нового или вернувшегося пользователя в БД и ChatMember.
+    """
+    if event.chat.type not in ("group", "supergroup") or event.chat.id >= 0:
+        return
+
+    new_cm = event.new_chat_member
+    if not new_cm or not new_cm.user or getattr(new_cm.user, "is_bot", False):
+        return
+
+    tg_user = new_cm.user
+    status = getattr(new_cm, "status", "")
+    is_active = status in ("member", "administrator", "creator", "restricted")
+
+    user = await session.scalar(select(User).where(User.telegram_id == tg_user.id))
+    if not user:
+        user = User(
+            telegram_id=tg_user.id,
+            username=tg_user.username,
+            full_name=tg_user.full_name or f"User {tg_user.id}",
+            role_level=PositionLevel.CITIZEN.value,
+            balance=5000,
+            is_enemy=False,
+        )
+        session.add(user)
+        await session.flush()
+    else:
+        if tg_user.username and user.username != tg_user.username:
+            user.username = tg_user.username
+        if tg_user.full_name and user.full_name != tg_user.full_name:
+            user.full_name = tg_user.full_name
+
+    cm = await session.scalar(
+        select(ChatMember).where(
+            ChatMember.chat_id == event.chat.id,
+            ChatMember.telegram_id == user.telegram_id
+        )
+    )
+    if not cm:
+        session.add(ChatMember(
+            chat_id=event.chat.id,
+            user_id=user.id,
+            telegram_id=user.telegram_id,
+            is_active=is_active,
+        ))
+    else:
+        cm.is_active = is_active
+        if is_active:
+            cm.last_seen_at = datetime.now(timezone.utc)
+    await session.commit()
+
+
+@router.my_chat_member()
+async def on_my_chat_member_update(event: ChatMemberUpdated, session: AsyncSession):
+    """
+    Когда бота добавляют в группу или наделяют правами:
+    Автоматически сканирует и сохраняет всех администраторов группы в базу данных.
+    """
+    if event.chat.type not in ("group", "supergroup") or event.chat.id >= 0:
+        return
+
+    new_status = getattr(event.new_chat_member, "status", "")
+    if new_status in ("administrator", "member"):
+        try:
+            admins = await event.bot.get_chat_administrators(event.chat.id)
+            for adm in admins:
+                if adm.user and not getattr(adm.user, "is_bot", False):
+                    adm_u = await session.scalar(select(User).where(User.telegram_id == adm.user.id))
+                    if not adm_u:
+                        adm_u = User(
+                            telegram_id=adm.user.id,
+                            username=adm.user.username,
+                            full_name=adm.user.full_name,
+                            role_level=PositionLevel.CITIZEN.value,
+                            balance=5000,
+                            is_enemy=False,
+                        )
+                        session.add(adm_u)
+                        await session.flush()
+                    cm = await session.scalar(
+                        select(ChatMember).where(
+                            ChatMember.chat_id == event.chat.id,
+                            ChatMember.telegram_id == adm.user.id
+                        )
+                    )
+                    if not cm:
+                        session.add(ChatMember(
+                            chat_id=event.chat.id,
+                            user_id=adm_u.id,
+                            telegram_id=adm.user.id,
+                            is_active=True,
+                        ))
+                    else:
+                        cm.is_active = True
+            await session.commit()
+        except Exception as e:
+            logger.debug("Не удалось просканировать админов при добавлении бота: %s", e)
+
+
+@router.message(F.new_chat_members)
+async def on_new_chat_members(message: Message, session: AsyncSession):
+    """Служебное сообщение о вступлении участников в группу (захват профилей как в Ирисе)."""
+    if message.chat.type not in ("group", "supergroup") or message.chat.id >= 0:
+        return
+
+    for tg_user in (message.new_chat_members or []):
+        if not getattr(tg_user, "is_bot", False):
+            user = await session.scalar(select(User).where(User.telegram_id == tg_user.id))
+            if not user:
+                user = User(
+                    telegram_id=tg_user.id,
+                    username=tg_user.username,
+                    full_name=tg_user.full_name or f"User {tg_user.id}",
+                    role_level=PositionLevel.CITIZEN.value,
+                    balance=5000,
+                    is_enemy=False,
+                )
+                session.add(user)
+                await session.flush()
+            cm = await session.scalar(
+                select(ChatMember).where(
+                    ChatMember.chat_id == message.chat.id,
+                    ChatMember.telegram_id == user.telegram_id
+                )
+            )
+            if not cm:
+                session.add(ChatMember(
+                    chat_id=message.chat.id,
+                    user_id=user.id,
+                    telegram_id=user.telegram_id,
+                    is_active=True,
+                ))
+            else:
+                cm.is_active = True
+                cm.last_seen_at = datetime.now(timezone.utc)
+    await session.commit()
+
+
+@router.message(Command("sync_users", "скан_чата", "обновить_жителей", "синхронизация", "sync_members"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "sync_users", "/sync_users", "!sync_users",
+    "скан_чата", "/скан_чата", "!скан_чата",
+    "обновить_жителей", "/обновить_жителей",
+    "синхронизация", "/синхронизация"
+))))
+async def cmd_sync_chat_users(message: Message, session: AsyncSession, db_user: User):
+    """
+    Команда сканирования и актуализации участников чата (как в Ирисе):
+    Синхронизирует всех администраторов чата, актуализирует базу данных группы.
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        await message.reply("⚠️ Команда доступна только в групповых чатах!")
+        return
+
+    is_admin = (
+        db_user.government_rank >= 2
+        or db_user.role_level >= PositionLevel.CHAT_WARDEN.value
+        or db_user.telegram_id == settings.OWNER_ID
+    )
+    if not is_admin and message.from_user:
+        try:
+            m = await message.chat.get_member(message.from_user.id)
+            if getattr(m, "status", "") in ("creator", "administrator"):
+                is_admin = True
+        except Exception:
+            pass
+
+    if not is_admin:
+        await message.reply("🚫 Сканировать участников чата вправе только Администрация и Блюстители!")
+        return
+
+    status_msg = await message.reply("🔍 <i>Сканирование участников чата и актуализация базы данных...</i>")
+    total_admins = 0
+
+    try:
+        admins = await message.chat.get_administrators()
+        total_admins = len(admins)
+        for adm in admins:
+            if adm.user and not getattr(adm.user, "is_bot", False):
+                adm_u = await session.scalar(select(User).where(User.telegram_id == adm.user.id))
+                if not adm_u:
+                    adm_u = User(
+                        telegram_id=adm.user.id,
+                        username=adm.user.username,
+                        full_name=adm.user.full_name or f"User {adm.user.id}",
+                        role_level=PositionLevel.CITIZEN.value,
+                        balance=5000,
+                        is_enemy=False,
+                    )
+                    session.add(adm_u)
+                    await session.flush()
+                cm = await session.scalar(
+                    select(ChatMember).where(
+                        ChatMember.chat_id == message.chat.id,
+                        ChatMember.telegram_id == adm.user.id
+                    )
+                )
+                if not cm:
+                    session.add(ChatMember(
+                        chat_id=message.chat.id,
+                        user_id=adm_u.id,
+                        telegram_id=adm.user.id,
+                        is_active=True,
+                    ))
+                else:
+                    cm.is_active = True
+        await session.commit()
+    except Exception as e:
+        logger.warning(f"Ошибка при скан-синхронизации: {e}")
+
+    total_in_group = await session.scalar(
+        select(func.count(ChatMember.id)).where(ChatMember.chat_id == message.chat.id, ChatMember.is_active.is_(True))
+    ) or 0
+
+    await status_msg.edit_text(
+        "👥 <b>СИНХРОНИЗАЦИЯ ЧАТА ЗАВЕРШЕНА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 Администраторов обнаружено: <b>{total_admins}</b>\n"
+        f"📊 Всего зарегистрировано в группе: <b>{total_in_group}</b> участников\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Бот работает аналогично Ирису: он автоматически фиксирует каждого жителя, "
+        "как только тот отправляет любое сообщение (текст, стикер, медиа) или заходит в группу.</i>"
+    )
+
 
 

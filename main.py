@@ -56,11 +56,13 @@ async def main():
     )
     dp = Dispatcher()
 
-    # 3. Регистрация Middlewares
-    dp.update.middleware(DatabaseSessionMiddleware(session_maker))
-    dp.message.middleware(UserSyncMiddleware())
-    dp.callback_query.middleware(UserSyncMiddleware())
-    dp.message.middleware(ChatRegulatorMiddleware())
+    # 3. Регистрация Middlewares (Outer middleware обеспечивает захват ВСЕХ пользователей и сообщений, как в Ирисе)
+    dp.update.outer_middleware(DatabaseSessionMiddleware(session_maker))
+    dp.message.outer_middleware(UserSyncMiddleware())
+    dp.callback_query.outer_middleware(UserSyncMiddleware())
+    dp.chat_member.outer_middleware(UserSyncMiddleware())
+    dp.my_chat_member.outer_middleware(UserSyncMiddleware())
+    dp.message.outer_middleware(ChatRegulatorMiddleware())
 
     # 4. Регистрация Handlers
     main_router = get_main_router()
@@ -76,9 +78,14 @@ async def main():
     logger.info("Все компоненты сконфигурированы. Запуск сервисов...")
 
     # 7. Параллельный контролируемый запуск сервисов
+    polling_updates = list(dp.resolve_used_update_types())
+    for upt in ("message", "callback_query", "chat_member", "my_chat_member"):
+        if upt not in polling_updates:
+            polling_updates.append(upt)
+
     tasks = [
         asyncio.create_task(
-            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()),
+            dp.start_polling(bot, allowed_updates=polling_updates),
             name="aiogram_polling",
         ),
         asyncio.create_task(
