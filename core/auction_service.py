@@ -86,7 +86,10 @@ class AuctionService:
             return False, "Вы уже удерживаете наивысшую ставку на этом лоте!", auction
 
         new_price = auction.current_price + increment
-        bidder_balance = getattr(bidder, "balance", 5000) or 0
+        bidder_balance = getattr(bidder, "balance", None)
+        if bidder_balance is None:
+            bidder.balance = 5000
+            bidder_balance = 5000
         if bidder_balance < new_price:
             return False, (
                 f"Недостаточно средств на счете!\n"

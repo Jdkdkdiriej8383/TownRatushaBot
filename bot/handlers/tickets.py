@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Optional
 from aiogram import Router, F
-from aiogram.filters import Command
+from aiogram.filters import Command, BaseFilter
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -557,17 +557,24 @@ async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db
         logger.debug(f"Не удалось отправить вердикт заявителю в ЛС: {e}")
 
 
-@router.message(F.message_thread_id.is_not(None))
+class ActiveTicketTopicFilter(BaseFilter):
+    async def __call__(self, message: Message, session: AsyncSession) -> bool:
+        if not message.message_thread_id:
+            return False
+        first_word = (message.text or "").split()[0].lower() if message.text else ""
+        if first_word.startswith("/") or first_word.startswith("!"):
+            return False
+        ticket = await TicketService.get_ticket_by_thread(session, message.message_thread_id)
+        return bool(ticket and ticket.status != TicketStatus.CLOSED.value)
+
+
+@router.message(ActiveTicketTopicFilter())
 async def guard_ticket_topic_messages(message: Message, session: AsyncSession, db_user: User):
     """
     Контроль доступа внутри форумных веток тикетов:
     В ветке тикета разрешено писать ТОЛЬКО заявителю и дежурным сотрудникам.
     Сообщения посторонних участников мгновенно удаляются.
     """
-    # Пропускаем команды, чтобы они шли в соответствующие обработчики
-    if (message.text or "").startswith("/"):
-        return
-
     thread_id = message.message_thread_id
     ticket = await TicketService.get_ticket_by_thread(session, thread_id)
     if not ticket or ticket.status == TicketStatus.CLOSED.value:

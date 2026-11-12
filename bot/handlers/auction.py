@@ -18,9 +18,14 @@ logger = logging.getLogger("townbot.handlers.auction")
 router = Router(name="auction_router")
 
 
-@router.message(Command("аукционы", "auctions", "лоты"))
-@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
-    "аукционы", "/аукционы", "auctions", "/auctions", "лоты", "/лоты"
+@router.message(Command("аукционы", "auctions", "лоты", "торги"))
+@router.message(F.text.func(lambda t: bool(t and (
+    t.lower().split()[0].split("@")[0] in (
+        "аукционы", "/аукционы", "!аукционы",
+        "auctions", "/auctions", "!auctions",
+        "лоты", "/лоты", "!лоты",
+        "торги", "/торги", "!торги"
+    )
 ))))
 async def cmd_list_auctions(message: Message, session: AsyncSession, db_user: User):
     """
@@ -34,7 +39,7 @@ async def cmd_list_auctions(message: Message, session: AsyncSession, db_user: Us
             "📦 <b>АКТИВНЫЕ АУКЦИОНЫ КОНФИСКАТА</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "В данный момент открытых торгов нет.\n\n"
-            "💡 <i>Сотрудники Ратуши (Ранг 2+) могут выставить конфискованное имущество:</i>\n"
+            "💡 <i>Выставить имущество на торги:</i>\n"
             "<code>/аукцион создать [название лота] [старт_цена] [минуты]</code>"
         )
         return
@@ -60,9 +65,14 @@ async def cmd_list_auctions(message: Message, session: AsyncSession, db_user: Us
     await message.reply("\n".join(lines))
 
 
-@router.message(Command("аукцион", "auction", "лот"))
-@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
-    "аукцион", "/аукцион", "auction", "/auction", "лот", "/лот"
+@router.message(Command("аукцион", "auction", "лот", "создать_аукцион", "new_auction"))
+@router.message(F.text.func(lambda t: bool(t and (
+    t.lower().split()[0].split("@")[0] in (
+        "аукцион", "/аукцион", "!аукцион",
+        "auction", "/auction", "!auction",
+        "лот", "/лот", "!лот",
+        "создать_аукцион", "/создать_аукцион", "!создать_аукцион"
+    )
 ))))
 async def cmd_auction_router(message: Message, session: AsyncSession, db_user: User):
     """
@@ -71,6 +81,10 @@ async def cmd_auction_router(message: Message, session: AsyncSession, db_user: U
     - /аукцион завершить <id>
     - /аукцион инфо <id>
     """
+    if db_user.is_enemy:
+        await message.reply("🚫 <b>Отказано:</b> Врагам города заблокирован доступ к аукционам!")
+        return
+
     args = (message.text or "").split()[1:]
     if not args:
         await message.reply(
@@ -78,7 +92,7 @@ async def cmd_auction_router(message: Message, session: AsyncSession, db_user: U
             "━━━━━━━━━━━━━━━━━━━━\n"
             "Доступные команды:\n"
             "• <code>/аукционы</code> — Список активных лотов\n"
-            "• <code>/аукцион создать [название] [цена] [минуты]</code> — Создать торги (Ранг 2+)\n"
+            "• <code>/аукцион создать [название] [цена] [минуты]</code> — Создать торги\n"
             "• <code>/аукцион завершить [ID]</code> — Досрочно закрыть аукцион\n"
             "• <code>/аукцион инфо [ID]</code> — Просмотр карточки лота\n\n"
             "💡 <i>Пример:</i> <code>/аукцион создать Алмазная броня 5000 30</code>"
@@ -89,19 +103,9 @@ async def cmd_auction_router(message: Message, session: AsyncSession, db_user: U
 
     # 1. Создание аукциона
     if subcmd in ("создать", "create", "new", "добавить", "add") or (args and args[-1].isdigit() and len(args) >= 2 and subcmd not in ("завершить", "close", "инфо", "info")):
-        # Проверка прав: Блюститель (Ранг 2+) или Администрация
-        is_warden = (
-            HierarchyService.is_owner(db_user)
-            or db_user.government_rank >= 2
-            or db_user.role_level >= PositionLevel.CHAT_WARDEN.value
-        )
-        if not is_warden:
-            await message.reply("🚫 <b>Отказано:</b> Выставлять конфискат на аукцион вправе только Блюстители (Ранг 2+) и Администрация города!")
-            return
-
         clean_args = args[1:] if subcmd in ("создать", "create", "new", "добавить", "add") else args
         if len(clean_args) < 2:
-            await message.reply("⚠️ Использование: <code>/аукцион создать [название лота] [старт_цена] [длительность_мин]</code>")
+            await message.reply("⚠️ Использование: <code>/аукцион создать [название лота] [старт_цена] [длительность_мин]</code>\nПример: <code>/аукцион создать Незерит 5000 30</code>")
             return
 
         # Парсим аргументы: последний может быть длительностью в минутах, предпоследний — цена
@@ -134,16 +138,18 @@ async def cmd_auction_router(message: Message, session: AsyncSession, db_user: U
         elif duration > 1440:  # максимум 24 часа
             duration = 1440
 
-        chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
-        if not chat_id or chat_id > 0:
-            chat_id = await TopicService.get_primary_group_chat_id(session) or settings.MAIN_CHAT_ID
+        target_chat_id = message.chat.id
+        if message.chat.type not in ("group", "supergroup") and settings.MAIN_CHAT_ID:
+            target_chat_id = settings.MAIN_CHAT_ID
+        if not target_chat_id or target_chat_id == 0:
+            target_chat_id = message.chat.id
 
         raw_thread_id = getattr(message, "message_thread_id", None)
         thread_id = raw_thread_id if isinstance(raw_thread_id, int) else None
 
         auction = await AuctionService.create_auction(
             session=session,
-            chat_id=chat_id,
+            chat_id=target_chat_id,
             initiator=db_user,
             title=title,
             start_price=price,
@@ -154,11 +160,23 @@ async def cmd_auction_router(message: Message, session: AsyncSession, db_user: U
         card_text = AuctionService.format_card_text(auction)
         keyboard = AuctionService.build_card_keyboard(auction)
 
-        sent_msg = await message.answer(
-            card_text,
-            reply_markup=keyboard,
-            message_thread_id=thread_id
-        )
+        try:
+            if thread_id:
+                sent_msg = await message.answer(
+                    card_text,
+                    reply_markup=keyboard,
+                    message_thread_id=thread_id
+                )
+            else:
+                sent_msg = await message.answer(
+                    card_text,
+                    reply_markup=keyboard
+                )
+        except Exception:
+            sent_msg = await message.reply(
+                card_text,
+                reply_markup=keyboard
+            )
 
         auction.message_id = sent_msg.message_id
         await session.commit()

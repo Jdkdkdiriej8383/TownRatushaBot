@@ -3,7 +3,8 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.base import get_session_maker, get_engine, Base
-from db.models import Regulator, Law, ChatSettings, User
+import db.models
+from db.models import *
 from core.enums import PositionLevel, LawSection
 from config import settings
 
@@ -691,6 +692,36 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                             "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS treasury_balance INTEGER DEFAULT 100000",
                             "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS total_salaries_paid INTEGER DEFAULT 0",
                             "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS total_fines_collected INTEGER DEFAULT 0",
+                            """
+                            CREATE TABLE IF NOT EXISTS auctions (
+                                id SERIAL PRIMARY KEY,
+                                chat_id BIGINT NOT NULL,
+                                thread_id BIGINT,
+                                message_id BIGINT,
+                                title VARCHAR(255) NOT NULL,
+                                description VARCHAR(1024),
+                                initiator_id INTEGER NOT NULL REFERENCES users(id),
+                                initiator_telegram_id BIGINT NOT NULL,
+                                start_price INTEGER NOT NULL,
+                                current_price INTEGER NOT NULL,
+                                min_step INTEGER DEFAULT 500,
+                                current_winner_id INTEGER REFERENCES users(id),
+                                current_winner_telegram_id BIGINT,
+                                current_winner_name VARCHAR(255),
+                                status VARCHAR(32) DEFAULT 'active',
+                                bids_count INTEGER DEFAULT 0,
+                                end_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                                closed_at TIMESTAMP WITH TIME ZONE
+                            )
+                            """,
+                            "CREATE INDEX IF NOT EXISTS ix_auctions_chat_id ON auctions(chat_id)",
+                            "CREATE INDEX IF NOT EXISTS ix_auctions_status ON auctions(status)",
+                            "CREATE INDEX IF NOT EXISTS ix_auctions_end_time ON auctions(end_time)",
+                            "UPDATE users SET balance = 5000 WHERE balance IS NULL",
+                            "UPDATE chat_settings SET treasury_balance = 100000 WHERE treasury_balance IS NULL",
+                            "UPDATE chat_settings SET total_salaries_paid = 0 WHERE total_salaries_paid IS NULL",
+                            "UPDATE chat_settings SET total_fines_collected = 0 WHERE total_fines_collected IS NULL",
                         ]
                         for migration_sql in pg_migrations:
                             try:
@@ -716,6 +747,36 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                             "ALTER TABLE chat_settings ADD COLUMN treasury_balance INTEGER DEFAULT 100000",
                             "ALTER TABLE chat_settings ADD COLUMN total_salaries_paid INTEGER DEFAULT 0",
                             "ALTER TABLE chat_settings ADD COLUMN total_fines_collected INTEGER DEFAULT 0",
+                            """
+                            CREATE TABLE IF NOT EXISTS auctions (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                chat_id BIGINT NOT NULL,
+                                thread_id BIGINT,
+                                message_id BIGINT,
+                                title VARCHAR(255) NOT NULL,
+                                description VARCHAR(1024),
+                                initiator_id INTEGER NOT NULL REFERENCES users(id),
+                                initiator_telegram_id BIGINT NOT NULL,
+                                start_price INTEGER NOT NULL,
+                                current_price INTEGER NOT NULL,
+                                min_step INTEGER DEFAULT 500,
+                                current_winner_id INTEGER REFERENCES users(id),
+                                current_winner_telegram_id BIGINT,
+                                current_winner_name VARCHAR(255),
+                                status VARCHAR(32) DEFAULT 'active',
+                                bids_count INTEGER DEFAULT 0,
+                                end_time TIMESTAMP NOT NULL,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                closed_at TIMESTAMP
+                            )
+                            """,
+                            "CREATE INDEX IF NOT EXISTS ix_auctions_chat_id ON auctions(chat_id)",
+                            "CREATE INDEX IF NOT EXISTS ix_auctions_status ON auctions(status)",
+                            "CREATE INDEX IF NOT EXISTS ix_auctions_end_time ON auctions(end_time)",
+                            "UPDATE users SET balance = 5000 WHERE balance IS NULL",
+                            "UPDATE chat_settings SET treasury_balance = 100000 WHERE treasury_balance IS NULL",
+                            "UPDATE chat_settings SET total_salaries_paid = 0 WHERE total_salaries_paid IS NULL",
+                            "UPDATE chat_settings SET total_fines_collected = 0 WHERE total_fines_collected IS NULL",
                         ]
                         for migration_sql in sqlite_migrations:
                             try:
