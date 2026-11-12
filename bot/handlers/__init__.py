@@ -13,6 +13,8 @@ from bot.handlers.referendum import router as referendum_router
 from bot.handlers.regulators_admin import router as regulators_router
 from bot.handlers.network import router as network_router
 from bot.handlers.broadcast import router as broadcast_router
+from bot.handlers.treasury import router as treasury_router
+from bot.handlers.auction import router as auction_router
 
 
 def get_main_router() -> Router:
@@ -24,6 +26,8 @@ def get_main_router() -> Router:
     main_router.include_router(admin_router)
     main_router.include_router(network_router)
     main_router.include_router(broadcast_router)
+    main_router.include_router(treasury_router)
+    main_router.include_router(auction_router)
     main_router.include_router(common_router)
     main_router.include_router(laws_router)
     main_router.include_router(justice_router)

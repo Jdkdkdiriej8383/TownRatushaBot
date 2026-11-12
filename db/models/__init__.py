@@ -8,6 +8,7 @@ from db.models.report import Report
 from db.models.ticket import Ticket
 from db.models.topic_config import TopicConfig
 from db.models.chat_member import ChatMember
+from db.models.auction import Auction
 
 __all__ = [
     "User",
@@ -20,4 +21,5 @@ __all__ = [
     "Ticket",
     "TopicConfig",
     "ChatMember",
+    "Auction",
 ]

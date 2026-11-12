@@ -507,10 +507,12 @@ async def cmd_pay_fine(message: Message, session: AsyncSession, db_user: User):
         await message.answer("ℹ️ Данный штраф уже был успешно оплачен ранее.")
         return
 
-    paid_fine = await FineService.pay_fine(session, fine_id)
+    target_chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else settings.MAIN_CHAT_ID
+    paid_fine = await FineService.pay_fine(session, fine_id, chat_id=target_chat_id)
     await message.answer(
         f"✅ <b>ШТРАФ №{fine_id} УСПЕШНО ОПЛАЧЕН</b>\n"
-        f"Сумма: <code>{paid_fine.amount:,}</code> валюты внесена в городскую казну.\n"
+        f"Сумма: <code>{paid_fine.amount:,}</code> ₽ внесена в городскую казну.\n"
+        f"Ваш остаток на балансе: <code>{db_user.balance:,}</code> ₽\n"
         f"Статус тикета: Оплачен. Претензии казначейства сняты."
     )
 

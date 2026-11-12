@@ -43,5 +43,10 @@ class ChatSettings(Base):
     network_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     network_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
+    # Государственная казна и городской бюджет
+    treasury_balance: Mapped[int] = mapped_column(Integer, default=100000)      # Резерв казны (100 000 ₽)
+    total_salaries_paid: Mapped[int] = mapped_column(Integer, default=0)        # Выплачено зарплат и премий
+    total_fines_collected: Mapped[int] = mapped_column(Integer, default=0)      # Собрано штрафов и аукционов
+
     def __repr__(self) -> str:
-        return f"<ChatSettings chat_id={self.chat_id} net={self.network_id} caps={self.anti_caps_enabled} spam={self.media_spam_enabled}>"
+        return f"<ChatSettings chat_id={self.chat_id} net={self.network_id} treasury={self.treasury_balance}>"

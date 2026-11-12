@@ -241,6 +241,12 @@ class FineStatus(str, Enum):
     CANCELLED = "cancelled"       # Отменен судом/старшей администрацией
 
 
+class AuctionStatus(str, Enum):
+    ACTIVE = "active"             # Активные торги
+    COMPLETED = "completed"       # Успешно завершен с победителем
+    CANCELLED = "cancelled"       # Отменен или завершен без ставок
+
+
 class ReportStatus(str, Enum):
     PENDING = "pending"
     CLAIMED = "claimed"

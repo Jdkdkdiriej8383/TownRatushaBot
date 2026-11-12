@@ -1,3 +1,5 @@
+import logging
+import inspect
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
@@ -8,6 +10,7 @@ from core.enums import PositionLevel
 from config import settings
 from bot.commands import setup_bot_commands, BOT_COMMANDS
 
+logger = logging.getLogger("townbot.common")
 router = Router(name="common_router")
 
 
@@ -55,8 +58,13 @@ async def cmd_help(message: Message, db_user: User):
         "• <code>/закон [номер]</code> — карточка статьи, санкции и регламент\n"
         "• <code>/досье [@юзер]</code> — судебно-следственная выписка и открытые штрафы\n"
         "• <code>/оплатить [ID_штрафа]</code> — погашение назначенного штрафа\n"
+        "• <code>/казна</code> — баланс Государственной казны города и бюджетная сводка\n"
+        "• <code>/баланс [@юзер]</code> — банковский счет гражданина\n"
+        "• <code>/перевод @юзер [сумма]</code> — банковский перевод средств другому жителю\n"
+        "• <code>/аукционы</code> — государственные аукционы конфиската (ставки с кнопок)\n"
         "• <code>/апелляция [ID_дела]</code> (<code>/appeal</code>) — подача судебной апелляции в Зал Суда\n\n"
         "👮 <b>БЛЮСТИТЕЛИ И ПОМОЩНИКИ (Ранги 1–2):</b>\n"
+        "• <code>/аукцион создать [лот] [цена] [мин]</code> — выставить конфискованное имущество на торги\n"
         "• <code>/warn [@юзер|reply] [причина]</code> — выдать предупреждение (3 варна = автокик/мут)\n"
         "• <code>/unwarn [@юзер|reply]</code> — снять предупреждение\n"
         "• <code>/mute [@юзер|reply] [время] [причина]</code> — ограничение переписки (Помощник: до 2ч, Блюститель: до 24ч)\n"
@@ -74,6 +82,7 @@ async def cmd_help(message: Message, db_user: User):
         "• <code>/суд</code> (<code>/court</code>) — регламент судебных заседаний и апелляций\n"
         "• <code>/вердикт [ID_дела] [приговор]</code> — вынесение окончательного судебного вердикта\n"
         "• <code>/указ [текст]</code> (<code>/decree</code>) — публикация государственного указа (Мэр / Кабмин)\n"
+        "• <code>/зарплата @сотрудник [сумма] [причина]</code> (<code>/премия</code>) — выплата жалования из Государственной казны\n"
         "• <code>/setrole [@юзер|reply] [должность]</code> — назначение государственной должности по табелю\n"
         "• <code>/разжаловать [@юзер|reply]</code> (<code>/demote</code>) — отстранение от должности в Граждане\n"
         "• <code>/staff</code> (<code>/состав</code>) — табель действующего состава администрации по рангам\n"
@@ -135,28 +144,32 @@ async def cmd_summon_all(message: Message, session: AsyncSession, db_user: User)
 
     # 1. Синхронизируем администраторов чата Telegram в ChatMember
     try:
-        admins = await message.chat.get_administrators()
-        for adm in admins:
-            if not adm.user.is_bot:
-                adm_u = await session.scalar(select(User).where(User.telegram_id == adm.user.id))
-                if not adm_u:
-                    adm_u = User(
-                        telegram_id=adm.user.id,
-                        username=adm.user.username,
-                        full_name=adm.user.full_name,
-                        role_level=PositionLevel.CITIZEN.value,
-                    )
-                    session.add(adm_u)
-                    await session.flush()
+        get_admins_func = getattr(message.chat, "get_administrators", None)
+        if callable(get_admins_func):
+            res = get_admins_func()
+            admins = (await res) if inspect.isawaitable(res) else res
+            if isinstance(admins, (list, tuple)):
+                for adm in admins:
+                    if hasattr(adm, "user") and not getattr(adm.user, "is_bot", False):
+                        adm_u = await session.scalar(select(User).where(User.telegram_id == adm.user.id))
+                        if not adm_u:
+                            adm_u = User(
+                                telegram_id=adm.user.id,
+                                username=adm.user.username,
+                                full_name=adm.user.full_name,
+                                role_level=PositionLevel.CITIZEN.value,
+                            )
+                            session.add(adm_u)
+                            await session.flush()
 
-                cm = await session.scalar(
-                    select(ChatMember).where(ChatMember.chat_id == chat_id, ChatMember.telegram_id == adm.user.id)
-                )
-                if not cm:
-                    session.add(ChatMember(chat_id=chat_id, user_id=adm_u.id, telegram_id=adm.user.id, is_active=True))
-                else:
-                    cm.is_active = True
-        await session.commit()
+                        cm = await session.scalar(
+                            select(ChatMember).where(ChatMember.chat_id == chat_id, ChatMember.telegram_id == adm.user.id)
+                        )
+                        if not cm:
+                            session.add(ChatMember(chat_id=chat_id, user_id=adm_u.id, telegram_id=adm.user.id, is_active=True))
+                        else:
+                            cm.is_active = True
+                await session.commit()
     except Exception as e:
         logger.debug(f"Не удалось актуализировать админов чата {chat_id}: {e}")
 

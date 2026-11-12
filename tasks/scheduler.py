@@ -1,8 +1,13 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from aiogram import Bot
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from core.fine_service import FineService
+from core.auction_service import AuctionService, _to_utc
+from core.enums import AuctionStatus
+from db.models import Auction
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -45,9 +50,49 @@ async def check_overdue_fines_job(session_maker: async_sessionmaker[AsyncSession
         logger.exception("Ошибка в фоновом воркере проверки штрафов: %s", e)
 
 
+async def check_expired_auctions_job(session_maker: async_sessionmaker[AsyncSession], bot: Bot):
+    """
+    Фоновый воркер:
+    Проверяет активные аукционы, время которых истекло.
+    Завершает торги, распределяет средства в Государственную казну и обновляет карточку лота.
+    """
+    try:
+        async with session_maker() as session:
+            now = datetime.now(timezone.utc)
+            query = select(Auction).where(Auction.status == AuctionStatus.ACTIVE.value)
+            result = await session.execute(query)
+            active_auctions = list(result.scalars().all())
+            expired_auctions = [
+                auc for auc in active_auctions
+                if (end_utc := _to_utc(auc.end_time)) and end_utc <= now
+            ]
+
+            for auc in expired_auctions:
+                closed_auc = await AuctionService.finalize_auction(session, auc.id)
+                if not closed_auc:
+                    continue
+
+                card_text = AuctionService.format_card_text(closed_auc)
+                keyboard = AuctionService.build_card_keyboard(closed_auc)
+
+                if closed_auc.message_id and closed_auc.chat_id:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=closed_auc.chat_id,
+                            message_id=closed_auc.message_id,
+                            text=card_text,
+                            reply_markup=keyboard
+                        )
+                    except Exception:
+                        pass
+    except Exception as e:
+        logger.exception("Ошибка в фоновом воркере проверки аукционов: %s", e)
+
+
 async def start_scheduler_loop(session_maker: async_sessionmaker[AsyncSession], bot: Bot, interval_seconds: int = 60):
-    """Бесконечный цикл периодической проверки штрафов."""
-    logger.info("Фоновый планировщик проверки штрафов запущен (интервал %s сек).", interval_seconds)
+    """Бесконечный цикл периодической проверки штрафов и аукционов."""
+    logger.info("Фоновый планировщик проверки штрафов и аукционов запущен (интервал %s сек).", interval_seconds)
     while True:
         await check_overdue_fines_job(session_maker, bot)
+        await check_expired_auctions_job(session_maker, bot)
         await asyncio.sleep(interval_seconds)

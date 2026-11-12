@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from db.models import Fine, User
+from db.models import Fine, User, ChatSettings
 from core.enums import FineStatus
 from config import settings
 
@@ -45,7 +45,7 @@ class FineService:
         return fine
 
     @staticmethod
-    async def pay_fine(session: AsyncSession, fine_id: int) -> Fine | None:
+    async def pay_fine(session: AsyncSession, fine_id: int, chat_id: int | None = None) -> Fine | None:
         query = select(Fine).where(Fine.id == fine_id)
         fine = await session.scalar(query)
         if not fine:
@@ -54,10 +54,12 @@ class FineService:
         fine.status = FineStatus.PAID.value
         fine.paid_at = datetime.now(timezone.utc)
 
-        # Проверяем, есть ли еще просроченные штрафы у гражданина
+        # Проверяем, есть ли еще просроченные штрафы у гражданина, и списываем баланс
         user_query = select(User).where(User.id == fine.user_id)
         user = await session.scalar(user_query)
         if user:
+            if hasattr(user, "balance") and user.balance is not None:
+                user.balance = max(0, user.balance - fine.amount)
             active_overdue = await session.scalar(
                 select(Fine).where(
                     Fine.user_id == user.id,
@@ -66,6 +68,16 @@ class FineService:
             )
             if not active_overdue:
                 user.is_wanted = False
+
+        # Пополняем Государственную казну чата
+        effective_chat_id = chat_id or settings.MAIN_CHAT_ID
+        if effective_chat_id:
+            chat_settings = await session.scalar(select(ChatSettings).where(ChatSettings.chat_id == effective_chat_id))
+            if not chat_settings:
+                chat_settings = ChatSettings(chat_id=effective_chat_id)
+                session.add(chat_settings)
+            chat_settings.treasury_balance = (chat_settings.treasury_balance or 0) + fine.amount
+            chat_settings.total_fines_collected = (chat_settings.total_fines_collected or 0) + fine.amount
 
         await session.commit()
         return fine

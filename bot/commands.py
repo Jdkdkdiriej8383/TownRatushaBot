@@ -60,6 +60,11 @@ BOT_COMMANDS = [
     BotCommand(command="settopic", description="Привязать топик форума (/топик)"),
     BotCommand(command="network", description="Сетка чатов и федерация (/сетка)"),
     BotCommand(command="bc", description="Глобальная рассылка гражданам (/рассылка)"),
+    BotCommand(command="treasury", description="Государственная казна города (/казна)"),
+    BotCommand(command="balance", description="Банковский счет гражданина (/баланс)"),
+    BotCommand(command="salary", description="Выплата жалования / премии (/зарплата, /премия)"),
+    BotCommand(command="auction", description="Аукцион конфиската (/аукцион, /аукционы)"),
+    BotCommand(command="transfer_money", description="Банковский перевод гражданину (/перевод)"),
     BotCommand(command="sync_menu", description="Обновить меню команд (/обновить_меню)"),
 ]
 

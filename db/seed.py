@@ -687,6 +687,10 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                             "ALTER TABLE reports ADD COLUMN IF NOT EXISTS chat_id BIGINT",
                             "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS chat_id BIGINT",
                             "ALTER TABLE punishments ADD COLUMN IF NOT EXISTS chat_id BIGINT",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS balance INTEGER DEFAULT 5000",
+                            "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS treasury_balance INTEGER DEFAULT 100000",
+                            "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS total_salaries_paid INTEGER DEFAULT 0",
+                            "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS total_fines_collected INTEGER DEFAULT 0",
                         ]
                         for migration_sql in pg_migrations:
                             try:
@@ -708,6 +712,10 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                             "ALTER TABLE reports ADD COLUMN chat_id BIGINT",
                             "ALTER TABLE tickets ADD COLUMN chat_id BIGINT",
                             "ALTER TABLE punishments ADD COLUMN chat_id BIGINT",
+                            "ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 5000",
+                            "ALTER TABLE chat_settings ADD COLUMN treasury_balance INTEGER DEFAULT 100000",
+                            "ALTER TABLE chat_settings ADD COLUMN total_salaries_paid INTEGER DEFAULT 0",
+                            "ALTER TABLE chat_settings ADD COLUMN total_fines_collected INTEGER DEFAULT 0",
                         ]
                         for migration_sql in sqlite_migrations:
                             try:

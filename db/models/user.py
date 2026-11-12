@@ -49,6 +49,9 @@ class User(Base):
     false_reports_count: Mapped[int] = mapped_column(Integer, default=0)   # Счетчик ложных вызовов
     reports_blocked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Экономика и финансы гражданина
+    balance: Mapped[int] = mapped_column(Integer, default=5000)  # Стартовый капитал гражданина (5 000 ₽)
+
     # Временные метки
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
