@@ -55,6 +55,9 @@ def get_appeal_inline_keyboard(appeal_id: int) -> InlineKeyboardMarkup:
 
 
 @router.message(Command("appeal", "апелляция", "иск"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "/appeal", "appeal", "/апелляция", "апелляция", "/иск", "иск", "!appeal", "!иск"
+))))
 async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
     """
     Подача апелляции или судебного иска гражданином (/appeal [текст] или /апелляция [текст]).
@@ -90,6 +93,18 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
     banned_status = "🚨 В изгнании (Бан)" if db_user.is_enemy else "✅ Гражданин"
     warns_status = f"{db_user.warns_count or 0}/5"
 
+    # Ищем всех судей (по должности, custom_title и рангу)
+    judges_query = select(User).where(
+        (User.custom_title.ilike("%судь%"))
+        | (User.custom_title.ilike("%мэр%"))
+        | (User.custom_title.ilike("%премьер%"))
+        | (User.role_level >= PositionLevel.SENIOR_WARDEN.value)
+        | (User.telegram_id == settings.OWNER_ID)
+    )
+    judges = (await session.scalars(judges_query)).all()
+    judge_mentions = [f"@{j.username}" for j in judges if j.username and j.telegram_id != settings.OWNER_ID]
+    judge_notice = " ".join(judge_mentions) if judge_mentions else "дежурный Судья / Администрация"
+
     card = (
         f"⚖️ <b>СУДЕБНАЯ АПЕЛЛЯЦИЯ #{ticket.id}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -97,6 +112,7 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
         f"• <b>Статус заявителя:</b> {banned_status} | Варны: <b>{warns_status}</b>\n"
         f"• <b>Суть обращения:</b>\n<i>«{appeal_text}»</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔔 <b>Судейский состав:</b> {judge_notice}\n"
         f"🏛️ <i>Дело открыто. Ожидает рассмотрения Судьей или Конституционным судьей.</i>"
     )
 
@@ -137,12 +153,8 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
         except Exception as e:
             logger.warning("Не удалось отправить карточку апелляции в топик суда %s: %s", send_thread, e)
 
-    # 4. Направляем карточку в ЛС судьям (Ранг 3+) и Овнеру
-    judges_query = select(User).where(
-        (User.role_level >= PositionLevel.ADMINISTRATION.value) |
-        (User.telegram_id == settings.OWNER_ID)
-    )
-    judges = (await session.scalars(judges_query)).all()
+    # 4. Направляем карточку в ЛС судьям и Овнеру
+    pm_sent_count = 0
     for judge in judges:
         try:
             await message.bot.send_message(
@@ -150,8 +162,9 @@ async def cmd_appeal(message: Message, session: AsyncSession, db_user: User):
                 text=card,
                 reply_markup=keyboard,
             )
+            pm_sent_count += 1
         except Exception as e:
-            logger.debug("Не удалось отправить карточку апелляции в ЛС судье %s: %s", judge.telegram_id, e)
+            logger.warning("Не удалось отправить карточку апелляции в ЛС судье %s: %s", judge.telegram_id, e)
 
 
 @router.message(Command("verdict", "вердикт"), TopicCommandFilter(["court", "admin"]))

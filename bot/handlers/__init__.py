@@ -11,6 +11,8 @@ from bot.handlers.passport import router as passport_router
 from bot.handlers.rp_actions import router as rp_actions_router
 from bot.handlers.referendum import router as referendum_router
 from bot.handlers.regulators_admin import router as regulators_router
+from bot.handlers.network import router as network_router
+from bot.handlers.broadcast import router as broadcast_router
 
 
 def get_main_router() -> Router:
@@ -20,6 +22,8 @@ def get_main_router() -> Router:
     main_router.include_router(moderation_router)
     main_router.include_router(court_router)
     main_router.include_router(admin_router)
+    main_router.include_router(network_router)
+    main_router.include_router(broadcast_router)
     main_router.include_router(common_router)
     main_router.include_router(laws_router)
     main_router.include_router(justice_router)

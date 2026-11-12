@@ -39,5 +39,9 @@ class ChatSettings(Base):
     reports_anonymous: Mapped[bool] = mapped_column(Boolean, default=False)
     reports_topic_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
+    # Сетка чатов (Мульти-чат объединение / Федерация)
+    network_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    network_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
     def __repr__(self) -> str:
-        return f"<ChatSettings chat_id={self.chat_id} caps={self.anti_caps_enabled} spam={self.media_spam_enabled} rep_dest={self.reports_destination}>"
+        return f"<ChatSettings chat_id={self.chat_id} net={self.network_id} caps={self.anti_caps_enabled} spam={self.media_spam_enabled}>"

@@ -1,9 +1,10 @@
 from typing import Callable, Dict, Any, Awaitable
+from datetime import datetime, timezone
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, User as TgUser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from db.models import User
+from db.models import User, ChatMember
 from core.enums import PositionLevel
 from config import settings
 
@@ -11,7 +12,7 @@ from config import settings
 class UserSyncMiddleware(BaseMiddleware):
     """
     Middleware автоматической регистрации и актуализации
-    профиля гражданина в базе данных.
+    профиля гражданина и привязки его к конкретным группам (ChatMember).
     Автоматически присваивает права Старшей Администрации (уровень 5) Овнеру (@DivniDed).
     """
 
@@ -56,5 +57,29 @@ class UserSyncMiddleware(BaseMiddleware):
                     user.is_enemy = False
 
             data["db_user"] = user
+
+            # Изоляция и учет участников чатов: фиксируем принадлежность пользователя к текущей группе
+            event_chat = getattr(event, "chat", None)
+            if not event_chat and hasattr(event, "message") and getattr(event, "message"):
+                event_chat = getattr(event.message, "chat", None)
+
+            if event_chat and getattr(event_chat, "type", "") in ("group", "supergroup") and getattr(event_chat, "id", 0) < 0:
+                chat_id = event_chat.id
+                cm_query = select(ChatMember).where(
+                    ChatMember.chat_id == chat_id,
+                    ChatMember.telegram_id == user.telegram_id
+                )
+                cm = await session.scalar(cm_query)
+                if not cm:
+                    cm = ChatMember(
+                        chat_id=chat_id,
+                        user_id=user.id,
+                        telegram_id=user.telegram_id,
+                        is_active=True,
+                    )
+                    session.add(cm)
+                else:
+                    cm.is_active = True
+                    cm.last_seen_at = datetime.now(timezone.utc)
 
         return await handler(event, data)

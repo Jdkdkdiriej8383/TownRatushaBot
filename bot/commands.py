@@ -58,6 +58,8 @@ BOT_COMMANDS = [
     BotCommand(command="staff", description="Государственный аппарат по рангам (/состав)"),
     BotCommand(command="decree", description="Государственный указ Мэра/Премьера (/указ)"),
     BotCommand(command="settopic", description="Привязать топик форума (/топик)"),
+    BotCommand(command="network", description="Сетка чатов и федерация (/сетка)"),
+    BotCommand(command="bc", description="Глобальная рассылка гражданам (/рассылка)"),
     BotCommand(command="sync_menu", description="Обновить меню команд (/обновить_меню)"),
 ]
 

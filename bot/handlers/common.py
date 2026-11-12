@@ -95,13 +95,15 @@ async def cmd_help(message: Message, db_user: User):
     await message.answer(help_text)
 
 
-@router.message(Command("созвать", "all", "созыв", "summon"))
-@router.message(F.text.lower().startswith("созвать всех"))
-@router.message(F.text.lower() == "созвать")
+@router.message(Command("созвать", "all", "созыв", "summon", "everyone"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "созвать", "/созвать", "all", "/all", "@all", "созыв", "/созыв", "summon", "/summon", "everyone", "/everyone"
+))))
 async def cmd_summon_all(message: Message, session: AsyncSession, db_user: User):
     """
-    Команда /созвать [тема] или /all [тема] — общий сбор жителей города в чате.
-    Доступно Администрации (уровни 4-5), Овнеру и Администраторам чата в Telegram.
+    Команда /созвать [тема] или /all [тема] — общий сбор жителей конкретного чата.
+    Пингует участников группы СКРЫТО через невидимые гиперссылки без засорения текста юзернеймами.
+    Учитывает только реальных участников текущей группы (ChatMember) и администраторов.
     """
     if message.chat.type not in ("group", "supergroup"):
         await message.answer("⚠️ Команда общего сбора <code>/созвать</code> доступна только в групповых чатах города!")
@@ -122,31 +124,76 @@ async def cmd_summon_all(message: Message, session: AsyncSession, db_user: User)
             pass
 
     if not is_admin:
-        await message.answer("🚫 Объявлять общий сбор жителей города может только Администрация!")
+        await message.answer("🚫 Объявлять общий сбор жителей группы может только Администрация!")
         return
 
     args = (message.text or "").split(maxsplit=1)
     topic = args[1].strip() if len(args) > 1 else "Срочный сбор жителей города"
 
-    # Получаем список зарегистрированных жителей с никнеймами
-    users_res = await session.scalars(
-        select(User).where(User.username.isnot(None), User.is_enemy.is_(False))
-    )
-    citizens = list(users_res.all())
+    chat_id = message.chat.id
+    from db.models import ChatMember
 
-    mentions_text = ""
-    if citizens:
-        usernames = [f"@{u.username}" for u in citizens if u.username and u.telegram_id != message.from_user.id]
-        if usernames:
-            mentions_text = "\n\n🔔 " + " ".join(usernames[:35])
+    # 1. Синхронизируем администраторов чата Telegram в ChatMember
+    try:
+        admins = await message.chat.get_administrators()
+        for adm in admins:
+            if not adm.user.is_bot:
+                adm_u = await session.scalar(select(User).where(User.telegram_id == adm.user.id))
+                if not adm_u:
+                    adm_u = User(
+                        telegram_id=adm.user.id,
+                        username=adm.user.username,
+                        full_name=adm.user.full_name,
+                        role_level=PositionLevel.CITIZEN.value,
+                    )
+                    session.add(adm_u)
+                    await session.flush()
+
+                cm = await session.scalar(
+                    select(ChatMember).where(ChatMember.chat_id == chat_id, ChatMember.telegram_id == adm.user.id)
+                )
+                if not cm:
+                    session.add(ChatMember(chat_id=chat_id, user_id=adm_u.id, telegram_id=adm.user.id, is_active=True))
+                else:
+                    cm.is_active = True
+        await session.commit()
+    except Exception as e:
+        logger.debug(f"Не удалось актуализировать админов чата {chat_id}: {e}")
+
+    # 2. Получаем участников именно ЭТОГО чата
+    cm_query = select(ChatMember.telegram_id).where(
+        ChatMember.chat_id == chat_id,
+        ChatMember.is_active == True,
+    ).distinct()
+    chat_tg_ids = set((await session.scalars(cm_query)).all())
+
+    # Исключаем самого инициатора сбора
+    if message.from_user:
+        chat_tg_ids.discard(message.from_user.id)
+
+    # Дополнительно: если участников в базе еще мало, берем из администраторов текущего чата
+    if not chat_tg_ids and message.from_user:
+        try:
+            admins = await message.chat.get_administrators()
+            for a in admins:
+                if not a.user.is_bot and a.user.id != message.from_user.id:
+                    chat_tg_ids.add(a.user.id)
+        except Exception:
+            pass
+
+    # 3. Формируем скрытые упоминания (Zero-Width Space HTML links: <a href="tg://user?id=...">&#8288;</a>)
+    # Это триггерит персональный пуш-пинг в Telegram, но визуально не забивает текст юзернеймами!
+    target_ids_list = list(chat_tg_ids)
+    first_chunk = target_ids_list[:35]
+    hidden_mentions = "".join([f'<a href="tg://user?id={uid}">&#8288;</a>' for uid in first_chunk])
 
     summon_text = (
         f"📢 <b>ОБЩИЙ СБОР ЖИТЕЛЕЙ ГОРОДА!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏛 <b>Инициатор сбора:</b> {message.from_user.mention_html()} ({db_user.position_title})\n"
         f"📌 <b>Повестка:</b> <b>{topic}</b>\n\n"
-        f"🔔 Всем гражданам и блюстителям порядка надлежит явиться в чат Ратуши!"
-        f"{mentions_text}\n"
+        f"🔔 <b>Внимание:</b> всем гражданам и блюстителям порядка надлежит явиться в чат!\n"
+        f"👥 Оповещено участников чата: <b>{len(target_ids_list)}</b> (скрытый вызов){hidden_mentions}\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -155,6 +202,18 @@ async def cmd_summon_all(message: Message, session: AsyncSession, db_user: User)
         await message.bot.pin_chat_message(message.chat.id, sent.message_id)
     except Exception:
         pass
+
+    # Если участников больше 35, отправляем остальным скрытые пинги отдельными тихими пакетами
+    if len(target_ids_list) > 35:
+        remaining = target_ids_list[35:]
+        for i in range(0, len(remaining), 35):
+            chunk = remaining[i:i + 35]
+            more_hidden = "".join([f'<a href="tg://user?id={uid}">&#8288;</a>' for uid in chunk])
+            try:
+                extra_msg = await message.answer(f"🔔 <i>Оповещение участников (пакет {i // 35 + 2})...</i>{more_hidden}")
+                asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [extra_msg.message_id], delay=10.0))
+            except Exception:
+                pass
 
 
 @router.message(Command("обновить_меню", "sync_menu", "update_menu", "обновитьменю", "menu_sync"))

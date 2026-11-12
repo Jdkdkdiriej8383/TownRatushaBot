@@ -7,6 +7,7 @@ from db.models.punishment import Punishment
 from db.models.report import Report
 from db.models.ticket import Ticket
 from db.models.topic_config import TopicConfig
+from db.models.chat_member import ChatMember
 
 __all__ = [
     "User",
@@ -18,4 +19,5 @@ __all__ = [
     "Report",
     "Ticket",
     "TopicConfig",
+    "ChatMember",
 ]

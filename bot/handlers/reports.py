@@ -262,8 +262,10 @@ async def cb_report_settings(callback: CallbackQuery, session: AsyncSession, db_
             pass
 
 
-@router.message(Command("report", "репорт", "жалоба"))
-@router.message(F.text.startswith("!жб") | F.text.startswith("!report"))
+@router.message(Command("report", "репорт", "жалоба", "жб"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "/report", "report", "/репорт", "репорт", "/жалоба", "жалоба", "/жб", "жб", "!жб", "!report", "!жалоба", "!репорт"
+))))
 async def cmd_report(message: Message, session: AsyncSession, db_user: User):
     """
     Подача жалобы гражданином:

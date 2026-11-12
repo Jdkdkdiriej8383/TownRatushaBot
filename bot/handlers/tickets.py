@@ -97,11 +97,31 @@ def get_ticket_action_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("ticket_panel", "приемная"), TopicCommandFilter(["tickets", "admin"]))
+@router.message(Command("ticket_panel", "приемная", "тикеты", "панель_тикетов", "панель_приемной"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "/ticket_panel", "ticket_panel", "/приемная", "приемная",
+    "/тикеты", "тикеты", "/панель_тикетов", "панель_тикетов",
+    "/панель_приемной", "панель_приемной", "!ticket_panel", "!приемная"
+))))
 async def cmd_ticket_panel(message: Message, session: AsyncSession, db_user: User):
-    """Отправляет панель приемной граждан для закрепления в TICKETS_TOPIC_ID."""
-    if not db_user.is_warden_or_higher and not db_user.is_middle_admin:
-        await message.reply("❌ Создавать панель приемной могут только сотрудники администрации!")
+    """Отправляет панель приемной граждан в чат."""
+    is_staff = (
+        db_user.government_rank >= 2
+        or db_user.is_warden_or_higher
+        or db_user.is_middle_admin
+        or HierarchyService.is_owner(db_user)
+        or db_user.telegram_id == settings.OWNER_ID
+    )
+    if not is_staff and message.from_user and message.chat.type in ("group", "supergroup"):
+        try:
+            m = await message.chat.get_member(message.from_user.id)
+            if getattr(m, "status", "") in ("creator", "administrator"):
+                is_staff = True
+        except Exception:
+            pass
+
+    if not is_staff:
+        await message.reply("❌ Создавать панель приемной могут только сотрудники администрации или администраторы чата!")
         return
 
     text = (
@@ -123,10 +143,11 @@ async def cb_ticket_create_start(callback: CallbackQuery, session: AsyncSession,
         "━━━━━━━━━━━━━━━━━━━━\n"
         "Пожалуйста, выберите орган или должностное лицо, которому адресовано обращение:"
     )
-    await callback.message.answer(
+    prompt_msg = await callback.message.answer(
         text,
         reply_markup=get_ticket_category_keyboard(),
     )
+    asyncio.create_task(auto_delete_messages(callback.bot, callback.message.chat.id, [prompt_msg.message_id], delay=45.0))
     await callback.answer()
 
 
@@ -361,11 +382,8 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
     """
     Команда /close [вердикт]
     Закрывает обращение, фиксирует вердикт, начисляет заслугу сотруднику и закрывает топик форума.
+    Доступно как сотрудникам администрации, так и самому заявителю.
     """
-    if not db_user.is_staff:
-        await message.reply("❌ Закрывать обращения могут только сотрудники администрации!")
-        return
-
     thread_id = getattr(message, "message_thread_id", None)
     if not thread_id:
         await message.reply("⚠️ Команда /close должна вызываться внутри топика обращения!")
@@ -376,8 +394,16 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
         await message.reply("❌ В этом топике нет активного обращения!")
         return
 
+    is_creator = (ticket.creator_id == db_user.id)
+    if not db_user.is_staff and not is_creator:
+        await message.reply("❌ Закрывать обращения могут только сотрудники администрации или сам заявитель!")
+        return
+
     parts = (message.text or "").split(maxsplit=1)
-    verdict = parts[1].strip() if len(parts) > 1 else "Вопрос решен / Обращение рассмотрено"
+    if is_creator and not db_user.is_staff:
+        verdict = parts[1].strip() if len(parts) > 1 else "Отозвано заявителем / Вопрос решен"
+    else:
+        verdict = parts[1].strip() if len(parts) > 1 else "Вопрос решен / Обращение рассмотрено"
 
     try:
         await TicketService.close_ticket(session, ticket.id, db_user, verdict)
@@ -447,17 +473,24 @@ async def cmd_close_ticket(message: Message, session: AsyncSession, db_user: Use
 @router.callback_query(F.data.startswith("ticket_close_btn:"))
 async def cb_ticket_close_btn(callback: CallbackQuery, session: AsyncSession, db_user: User):
     """Закрытие тикета по кнопке внутри карточки."""
-    if not db_user.is_staff:
-        await callback.answer("❌ Закрывать обращения могут только сотрудники администрации!", show_alert=True)
+    ticket_id = int(callback.data.split(":")[1])
+    ticket = await TicketService.get_ticket(session, ticket_id)
+    if not ticket:
+        await callback.answer("Обращение не найдено!", show_alert=True)
         return
 
-    ticket_id = int(callback.data.split(":")[1])
+    is_creator = (ticket.creator_id == db_user.id)
+    if not db_user.is_staff and not is_creator:
+        await callback.answer("❌ Закрывать обращения могут только сотрудники администрации или сам заявитель!", show_alert=True)
+        return
+
+    verdict_str = "Отозвано заявителем / Вопрос урегулирован" if is_creator and not db_user.is_staff else "Вопрос решен через быстрое закрытие"
     try:
         ticket = await TicketService.close_ticket(
             session=session,
             ticket_id=ticket_id,
             staff_user=db_user,
-            verdict="Вопрос решен через быстрое закрытие",
+            verdict=verdict_str,
         )
     except TownBaseException as e:
         await callback.answer(e.message, show_alert=True)
