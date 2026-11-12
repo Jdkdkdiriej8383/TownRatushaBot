@@ -30,6 +30,11 @@ class User(Base):
     is_enemy: Mapped[bool] = mapped_column(Boolean, default=False)
     enemy_reason: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
+    # Глобальный бан в боте (эксклюзивно для Владельца бота)
+    is_bot_banned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    bot_ban_reason: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    bot_banned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Minecraft паспортные данные
     minecraft_nick: Mapped[Optional[str]] = mapped_column(String(32), unique=True, index=True, nullable=True)
 

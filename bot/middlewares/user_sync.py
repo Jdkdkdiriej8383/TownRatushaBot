@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import User, ChatMember
 from core.enums import PositionLevel
 from config import settings
+from bot.utils import BOT_BAN_USER_NOTICE
 
 
 class UserSyncMiddleware(BaseMiddleware):
@@ -103,25 +104,63 @@ class UserSyncMiddleware(BaseMiddleware):
 
         # 1. Синхронизируем автора события (from_user)
         event_from_user: TgUser = data.get("event_from_user") or getattr(event, "from_user", None)
+        user: Optional[User] = None
         if session and event_from_user and not event_from_user.is_bot:
             user = await self._sync_single_user(session, event_from_user, chat_id=chat_id)
             if user:
                 data["db_user"] = user
 
-        # 2. Если в сообщении есть reply_to_message — синхронизируем адресата реплая
+        # 2. Проверка глобальной блокировки в боте (Bot Ban)
+        if user and getattr(user, "is_bot_banned", False) and user.telegram_id != settings.OWNER_ID:
+            bot = data.get("bot") or getattr(event, "bot", None)
+
+            # Если в группе/супергруппе: выгоняем и удаляем сообщение
+            if event_chat and getattr(event_chat, "type", "") in ("group", "supergroup") and getattr(event_chat, "id", 0) < 0:
+                if bot:
+                    try:
+                        await bot.ban_chat_member(chat_id=event_chat.id, user_id=user.telegram_id)
+                    except Exception:
+                        pass
+                if hasattr(event, "delete"):
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                return None
+
+            # Если в ЛС с ботом (private): информируем о бане и обращении к @DivniDed
+            if event_chat and getattr(event_chat, "type", "") == "private":
+                reason = user.bot_ban_reason or "Нарушение регламента"
+                notice_text = BOT_BAN_USER_NOTICE.format(reason=reason)
+                if hasattr(event, "answer"):
+                    try:
+                        await event.answer(notice_text, parse_mode="HTML")
+                    except Exception:
+                        pass
+                return None
+
+            # Если CallbackQuery от забаненного:
+            if hasattr(event, "answer"):
+                try:
+                    await event.answer("🚫 Вы заблокированы в боте. Для разбана обратитесь к @DivniDed", show_alert=True)
+                except Exception:
+                    pass
+                return None
+
+        # 3. Если в сообщении есть reply_to_message — синхронизируем адресата реплая
         reply = getattr(event, "reply_to_message", None)
         if session and reply:
             reply_user = getattr(reply, "forward_from", None) or getattr(reply, "from_user", None)
             if reply_user and not getattr(reply_user, "is_bot", False):
                 await self._sync_single_user(session, reply_user, chat_id=chat_id)
 
-        # 3. Если в группу добавлены новые участники (message.new_chat_members)
+        # 4. Если в группу добавлены новые участники (message.new_chat_members)
         new_members = getattr(event, "new_chat_members", None)
         if session and new_members:
             for new_m in new_members:
                 await self._sync_single_user(session, new_m, chat_id=chat_id)
 
-        # 4. Если это событие смены статуса участника (ChatMemberUpdated)
+        # 5. Если это событие смены статуса участника (ChatMemberUpdated)
         new_cm = getattr(event, "new_chat_member", None)
         if session and new_cm and hasattr(new_cm, "user"):
             status = getattr(new_cm, "status", "")

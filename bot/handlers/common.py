@@ -357,6 +357,14 @@ async def on_chat_member_update(event: ChatMemberUpdated, session: AsyncSession)
         if tg_user.full_name and user.full_name != tg_user.full_name:
             user.full_name = tg_user.full_name
 
+    # Если пользователь глобально заблокирован в боте - немедленно баним его в группе
+    if user and getattr(user, "is_bot_banned", False) and user.telegram_id != settings.OWNER_ID:
+        try:
+            await event.bot.ban_chat_member(chat_id=event.chat.id, user_id=user.telegram_id)
+        except Exception:
+            pass
+        return
+
     cm = await session.scalar(
         select(ChatMember).where(
             ChatMember.chat_id == event.chat.id,
@@ -444,6 +452,15 @@ async def on_new_chat_members(message: Message, session: AsyncSession):
                 )
                 session.add(user)
                 await session.flush()
+
+            # Если пользователь глобально заблокирован в боте - сразу баним и удаляем сервисное сообщение
+            if user and getattr(user, "is_bot_banned", False) and user.telegram_id != settings.OWNER_ID:
+                try:
+                    await message.bot.ban_chat_member(chat_id=message.chat.id, user_id=user.telegram_id)
+                    await message.delete()
+                except Exception:
+                    pass
+                continue
             cm = await session.scalar(
                 select(ChatMember).where(
                     ChatMember.chat_id == message.chat.id,

@@ -692,6 +692,9 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                             "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS treasury_balance INTEGER DEFAULT 100000",
                             "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS total_salaries_paid INTEGER DEFAULT 0",
                             "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS total_fines_collected INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_bot_banned BOOLEAN DEFAULT FALSE",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_ban_reason VARCHAR(512)",
+                            "ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_banned_at TIMESTAMP WITH TIME ZONE",
                             """
                             CREATE TABLE IF NOT EXISTS auctions (
                                 id SERIAL PRIMARY KEY,
@@ -747,6 +750,9 @@ async def seed_database(max_retries: int = 5, retry_delay: float = 3.0, force_wi
                             "ALTER TABLE chat_settings ADD COLUMN treasury_balance INTEGER DEFAULT 100000",
                             "ALTER TABLE chat_settings ADD COLUMN total_salaries_paid INTEGER DEFAULT 0",
                             "ALTER TABLE chat_settings ADD COLUMN total_fines_collected INTEGER DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN is_bot_banned BOOLEAN DEFAULT 0",
+                            "ALTER TABLE users ADD COLUMN bot_ban_reason VARCHAR(512)",
+                            "ALTER TABLE users ADD COLUMN bot_banned_at TIMESTAMP",
                             """
                             CREATE TABLE IF NOT EXISTS auctions (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT,

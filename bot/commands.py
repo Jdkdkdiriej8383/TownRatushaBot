@@ -65,6 +65,8 @@ BOT_COMMANDS = [
     BotCommand(command="salary", description="Выплата жалования / премии (/зарплата, /премия)"),
     BotCommand(command="auction", description="Аукцион конфиската (/аукцион, /аукционы)"),
     BotCommand(command="transfer_money", description="Банковский перевод гражданину (/перевод)"),
+    BotCommand(command="botban", description="Глобальный бан в боте (/банбот) [Владелец]"),
+    BotCommand(command="unbotban", description="Снять бан в боте (/разбанбот) [Владелец]"),
     BotCommand(command="sync_users", description="Синхронизировать жителей чата (/скан_чата)"),
     BotCommand(command="sync_menu", description="Обновить меню команд (/обновить_меню)"),
 ]

@@ -7,6 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import User, ChatMember
 from core.enums import PositionLevel
 
+BOT_BAN_USER_NOTICE = (
+    "🚫 <b>ДОСТУП К БОТУ ЗАБЛОКИРОВАН</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "⚖️ <b>Статус:</b> Персональная блокировка в TownBot\n"
+    "📝 <b>Причина:</b> <i>{reason}</i>\n"
+    "⏰ <b>Срок:</b> Бессрочно\n"
+    "━━━━━━━━━━━━━━━━━━━━\n"
+    "⚠️ <i>Вам ограничен доступ ко всем функциям, сервисам и чатам бота.</i>\n\n"
+    "📬 <b>Для разбана обратитесь к Создателю бота:</b>\n"
+    "👉 <b>@DivniDed</b>"
+)
+
 
 async def _ensure_chat_member(session: AsyncSession, chat, user: User) -> None:
     """Гарантирует привязку пользователя к группе в таблице chat_members."""

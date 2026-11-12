@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -7,11 +8,14 @@ from aiogram.types import Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models.user import User
+from db.models import ChatSettings, ChatMember
+from config import settings
 from core.enums import PositionLevel, TopicType
+from core.hierarchy_service import HierarchyService
 from core.moderation_service import ModerationService, parse_duration
 from core.topic_service import TopicService
 from core.exceptions import TownBaseException
-from bot.utils import extract_target_user
+from bot.utils import extract_target_user, BOT_BAN_USER_NOTICE
 from bot.filters.topic import TopicCommandFilter, auto_delete_messages
 from bot.filters.role import MinRankFilter
 
@@ -473,3 +477,203 @@ async def cmd_clear_messages(message: Message, session: AsyncSession, db_user: U
 
     confirm = await message.answer(f"🗑️ Удалено {deleted_count} сообщений.")
     asyncio.create_task(auto_delete_messages(message.bot, message.chat.id, [confirm.message_id], delay=3.0))
+
+
+@router.message(Command("botban", "bot_ban", "банбот", "бан_бот"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "botban", "/botban", "!botban",
+    "банбот", "/банбот", "!банбот",
+    "бан_бот", "/бан_бот", "!бан_бот",
+))))
+async def cmd_bot_ban(message: Message, session: AsyncSession, db_user: User):
+    """
+    Глобальный бан в боте (эксклюзивно для Владельца бота):
+    /банбот <reply | @username | tg_id> [причина]
+    1. Блокирует пользователя во всем боте.
+    2. Банит пользователя во всех группах сетки чатов.
+    3. Отправляет нарушителю уведомление об обращении к @DivniDed для разбана.
+    4. Предотвращает любой вход нарушителя в другие группы бота.
+    """
+    if not HierarchyService.is_owner(db_user):
+        await message.reply(
+            "🚫 <b>Отказано в доступе!</b>\n"
+            "Команда глобальной блокировки в боте доступна исключительно Создателю и Владельцу бота (@DivniDed)."
+        )
+        return
+
+    raw_args = (message.text or "").split()[1:]
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.reply(
+            "⚠️ <b>Использование:</b> <code>/банбот [причина]</code> в ответ на сообщение нарушителя\n"
+            "или: <code>/банбот @username [причина]</code>\n"
+            "или: <code>/банбот telegram_id [причина]</code>"
+        )
+        return
+
+    if HierarchyService.is_owner(target_user):
+        await message.reply("🤦 Нельзя забанить в боте Создателя города!")
+        return
+
+    reason = " ".join(remaining_args).strip() if remaining_args else "Решение Создателя бота"
+
+    # Устанавливаем флаг блокировки
+    target_user.is_bot_banned = True
+    target_user.bot_ban_reason = reason
+    target_user.bot_banned_at = datetime.now(timezone.utc)
+
+    # Баним во всех известных группах бота
+    groups_settings = (await session.scalars(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0))).all()
+    groups_members = (await session.scalars(select(ChatMember.chat_id).where(ChatMember.chat_id < 0).distinct())).all()
+    all_chat_ids = set(groups_settings).union(set(groups_members))
+    if message.chat and message.chat.id < 0:
+        all_chat_ids.add(message.chat.id)
+
+    banned_groups_count = 0
+    for cid in all_chat_ids:
+        try:
+            await message.bot.ban_chat_member(chat_id=cid, user_id=target_user.telegram_id)
+            banned_groups_count += 1
+        except Exception as be:
+            logger.debug("Не удалось забанить %s в группе %s: %s", target_user.telegram_id, cid, be)
+
+    # Деактивируем статус участника в базе
+    cm_records = (await session.scalars(
+        select(ChatMember).where(ChatMember.telegram_id == target_user.telegram_id)
+    )).all()
+    for cm in cm_records:
+        cm.is_active = False
+
+    await session.commit()
+
+    # Отправляем красивое личное уведомление нарушителю
+    user_notice = BOT_BAN_USER_NOTICE.format(reason=reason)
+    try:
+        await message.bot.send_message(
+            chat_id=target_user.telegram_id,
+            text=user_notice,
+            parse_mode="HTML"
+        )
+    except Exception as ne:
+        logger.debug("Не удалось отправить личное сообщение пользователю %s: %s", target_user.telegram_id, ne)
+
+    # Отвечаем Владельцу
+    target_name = f"@{target_user.username}" if target_user.username else (target_user.full_name or f"ID {target_user.telegram_id}")
+    reply_text = (
+        f"⛔ <b>ГЛОБАЛЬНЫЙ БАН В БОТЕ (BOT BAN)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Нарушитель:</b> {target_name} (<code>{target_user.telegram_id}</code>)\n"
+        f"• <b>Инициатор:</b> @{db_user.username or 'DivniDed'} (Владелец бота)\n"
+        f"• <b>Причина:</b> <i>{reason}</i>\n"
+        f"• <b>Исключен из групп:</b> <b>{banned_groups_count}</b> чат(ов)\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔒 <i>Пользователь полностью заблокирован в системе бота. При входе в любой чат сетки он будет мгновенно забанен повторно.</i>"
+    )
+    await message.reply(reply_text)
+
+    await ModerationService.send_audit_log(
+        bot=message.bot,
+        session=session,
+        chat_id=message.chat.id,
+        target=target_user,
+        issuer=db_user,
+        action_title="ГЛОБАЛЬНЫЙ БАН В БОТЕ",
+        reason=reason,
+    )
+
+
+@router.message(Command("unbotban", "unbot_ban", "разбанбот", "разбан_бот"))
+@router.message(F.text.func(lambda t: bool(t and t.lower().split()[0].split("@")[0] in (
+    "unbotban", "/unbotban", "!unbotban",
+    "разбанбот", "/разбанбот", "!разбанбот",
+    "разбан_бот", "/разбан_бот", "!разбан_бот",
+))))
+async def cmd_unbot_ban(message: Message, session: AsyncSession, db_user: User):
+    """
+    Снятие глобального бана в боте (эксклюзивно для Владельца бота):
+    /разбанбот <reply | @username | tg_id> [причина]
+    """
+    if not HierarchyService.is_owner(db_user):
+        await message.reply(
+            "🚫 <b>Отказано в доступе!</b>\n"
+            "Команда разбана в боте доступна исключительно Создателю и Владельцу бота (@DivniDed)."
+        )
+        return
+
+    raw_args = (message.text or "").split()[1:]
+    target_user, remaining_args = await extract_target_user(message, session, raw_args)
+
+    if not target_user:
+        await message.reply(
+            "⚠️ <b>Использование:</b> <code>/разбанбот [причина]</code> в ответ на сообщение\n"
+            "или: <code>/разбанбот @username [причина]</code>\n"
+            "или: <code>/разбанбот telegram_id [причина]</code>"
+        )
+        return
+
+    if not getattr(target_user, "is_bot_banned", False):
+        await message.reply(f"ℹ️ Пользователь <code>{target_user.telegram_id}</code> не заблокирован в боте.")
+        return
+
+    reason = " ".join(remaining_args).strip() if remaining_args else "Решение Создателя бота"
+
+    target_user.is_bot_banned = False
+    target_user.bot_ban_reason = None
+    target_user.bot_banned_at = None
+
+    # Разбаниваем в группах, чтобы пользователь мог снова зайти
+    groups_settings = (await session.scalars(select(ChatSettings.chat_id).where(ChatSettings.chat_id < 0))).all()
+    groups_members = (await session.scalars(select(ChatMember.chat_id).where(ChatMember.chat_id < 0).distinct())).all()
+    all_chat_ids = set(groups_settings).union(set(groups_members))
+    if message.chat and message.chat.id < 0:
+        all_chat_ids.add(message.chat.id)
+
+    unbanned_count = 0
+    for cid in all_chat_ids:
+        try:
+            await message.bot.unban_chat_member(chat_id=cid, user_id=target_user.telegram_id, only_if_banned=True)
+            unbanned_count += 1
+        except Exception:
+            pass
+
+    await session.commit()
+
+    # Уведомляем пользователя
+    try:
+        await message.bot.send_message(
+            chat_id=target_user.telegram_id,
+            text=(
+                "🕊️ <b>БЛОКИРОВКА В БОТЕ СНЯТА</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Создатель бота (@DivniDed) разблокировал ваш аккаунт в TownBot.\n"
+                f"📝 <b>Причина:</b> <i>{reason}</i>\n\n"
+                "Вам вновь открыт доступ ко всем сервисам и чатам города."
+            ),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    target_name = f"@{target_user.username}" if target_user.username else (target_user.full_name or f"ID {target_user.telegram_id}")
+    reply_text = (
+        f"✅ <b>ГЛОБАЛЬНЫЙ РАЗБАН В БОТЕ (UNBOT BAN)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Пользователь:</b> {target_name} (<code>{target_user.telegram_id}</code>)\n"
+        f"• <b>Инициатор:</b> @{db_user.username or 'DivniDed'} (Владелец бота)\n"
+        f"• <b>Причина:</b> <i>{reason}</i>\n"
+        f"• <b>Разблокирован в группах:</b> <b>{unbanned_count}</b> чат(ов)\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔓 <i>Глобальная блокировка аннулирована. Пользователь снова может взаимодействовать с ботом.</i>"
+    )
+    await message.reply(reply_text)
+
+    await ModerationService.send_audit_log(
+        bot=message.bot,
+        session=session,
+        chat_id=message.chat.id,
+        target=target_user,
+        issuer=db_user,
+        action_title="СНЯТИЕ БАНА В БОТЕ",
+        reason=reason,
+    )
